@@ -1,0 +1,29 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Spike crate for diagnostics design exploration. Not published.
+
+[package]
+name = "azure_core_diag_runner"
+version = "0.1.0"
+description = "Runner that benchmarks the diagnostics combos, emits the comparison CSV, and dumps the sample gallery."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "diag-bench"
+path = "src/main.rs"
+
+[dependencies]
+azure_core_diag_common = { path = "../azure_core_diag_common" }
+azure_core_diag_combo1 = { path = "../azure_core_diag_combo1" }
+azure_core_diag_combo2 = { path = "../azure_core_diag_combo2" }
+azure_core_diag_combo3 = { path = "../azure_core_diag_combo3" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

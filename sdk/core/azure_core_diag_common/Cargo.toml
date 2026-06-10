@@ -1,0 +1,30 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Spike crate for diagnostics design exploration. Not published.
+
+[package]
+name = "azure_core_diag_common"
+version = "0.1.0"
+description = "Shared scaffolding (scenarios, mock clock, harness, wire codec) for Azure SDK diagnostics design spikes."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+azure_core = { workspace = true, features = ["test"] }
+azure_core_test.workspace = true
+flate2.workspace = true
+futures.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

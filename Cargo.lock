@@ -267,6 +267,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "azure_core_diag_combo1"
+version = "0.1.0"
+dependencies = [
+ "azure_core",
+ "azure_core_diag_combo3",
+ "azure_core_diag_common",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "azure_core_diag_combo2"
+version = "0.1.0"
+dependencies = [
+ "azure_core",
+ "azure_core_diag_common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "azure_core_diag_combo3"
+version = "0.1.0"
+dependencies = [
+ "azure_core",
+ "azure_core_diag_common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "azure_core_diag_common"
+version = "0.1.0"
+dependencies = [
+ "azure_core",
+ "azure_core_test",
+ "flate2",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "azure_core_diag_runner"
+version = "0.1.0"
+dependencies = [
+ "azure_core_diag_combo1",
+ "azure_core_diag_combo2",
+ "azure_core_diag_combo3",
+ "azure_core_diag_common",
+ "serde_json",
+]
+
+[[package]]
 name = "azure_core_macros"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

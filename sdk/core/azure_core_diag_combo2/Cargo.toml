@@ -1,0 +1,28 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Spike crate for diagnostics design exploration. Not published.
+
+[package]
+name = "azure_core_diag_combo2"
+version = "0.1.0"
+description = "Combo 2 diagnostics spike: tiered hybrid (summary JSON default, detailed binary on demand/error)."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+azure_core.workspace = true
+azure_core_diag_common = { path = "../azure_core_diag_common" }
+serde = { workspace = true }
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

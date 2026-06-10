@@ -1,0 +1,31 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Spike crate for diagnostics design exploration. Not published.
+
+[package]
+name = "azure_core_diag_combo1"
+version = "0.1.0"
+description = "Combo 1 diagnostics spike: arena span tree serialized to a compact binary blob (decode tool included)."
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "diag-decode"
+path = "src/bin/diag-decode.rs"
+
+[dependencies]
+azure_core.workspace = true
+azure_core_diag_common = { path = "../azure_core_diag_common" }
+serde_json.workspace = true
+
+[dev-dependencies]
+azure_core_diag_combo3 = { path = "../azure_core_diag_combo3" }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
