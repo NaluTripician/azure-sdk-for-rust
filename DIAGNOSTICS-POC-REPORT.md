@@ -5,6 +5,37 @@
 > (`nalutripician/rust-diagnostics-prototype`). Spike crates live under `sdk/core/azure_core_diag_*`
 > and are all `publish = false`.
 
+---
+
+## Reader's guide: the three designs in plain language
+
+> **New to this? Read this section first.** The rest of the report compares three ways the Rust SDK
+> could capture and emit diagnostics for one *operation* (an SDK call, including its retries and any
+> fan-out). They're labelled **"Combo 1/2/3"** because each is a *combination* of design choices —
+> but you can follow the whole report with just these one-liners.
+
+| Label (used throughout) | Plain-language name | What it produces | One-line pitch |
+|---|---|---|---|
+| **Combo 3** | **Baseline — "everything, always, as JSON"** | A nested JSON object, built on every call | Most familiar and the best OpenTelemetry fit, but the most expensive and the largest output. It's the yardstick the others are measured against. |
+| **Combo 1** | **Binary span tree — "full detail, compact, only when needed"** | A small **binary blob** (decode to JSON with a tool) | Captures the complete call tree cheaply, throws it away for free when the call succeeds, and is the smallest full-fidelity format. |
+| **Combo 2** ⭐ | **Tiered — "cheap summary by default, full detail on demand"** | A tiny human-readable **summary** by default; the full binary tree on error or when asked | Looks like today's request diagnostics, costs almost nothing on the happy path, and never loses detail when something breaks. **Recommended default.** |
+
+**A few terms that recur:**
+
+- **Operation** — one SDK call end to end, including its retry attempts and any fan-out.
+- **Attempt** — a single HTTP try within an operation (a `429` then a `200` = two attempts).
+- **Fan-out** — a query that splits into many parallel sub-requests, one per partition / "feed range".
+- **Happy path** — the call succeeded; diagnostics are rarely read, so the cost paid here matters most.
+- **Scenarios S1–S4** — fixed test cases run against every design so the numbers compare
+  apples-to-apples: **S1** a single success, **S2** a retry-then-success, **S3** an error, **S4** a
+  fan-out with 10 or 25 children.
+
+If you only remember one thing: **Combo 2's default output is a small summary that looks like
+today's diagnostics; Combo 1 is the compact full-detail tree behind it; Combo 3 is the
+always-verbose baseline we compare against.**
+
+---
+
 ## How to demo this live
 
 ```powershell
@@ -96,9 +127,9 @@ A full design is one pick per axis; combos stack picks across axes.
 
 | Combo | Name | Stack | Role |
 |---|---|---|---|
-| **Combo 3** | tracing-native baseline | A2 + B2 + C1 + D1 | Baseline / strawman; OTel-export path |
-| **Combo 1** | Span + Encoded binary | A2/A3 + C2 + D2 + D4 | Primary: full-fidelity, cheap, small |
-| **Combo 2** | Tiered hybrid | A3 + B3 + C3 + D3 | Primary: customer- & migration-friendly default |
+| **Combo 3** | tracing-native baseline ("everything, always, as JSON") | A2 + B2 + C1 + D1 | Baseline / strawman; OTel-export path |
+| **Combo 1** | Span + Encoded binary ("full detail, compact, only when needed") | A2/A3 + C2 + D2 + D4 | Primary: full-fidelity, cheap, small |
+| **Combo 2** | Tiered hybrid ("cheap summary by default, full detail on demand") | A3 + B3 + C3 + D3 | Primary: customer- & migration-friendly default |
 
 All three consume the same `DiagSink` event trait, driven by a deterministic scenario driver:
 
@@ -344,9 +375,92 @@ it stays at 304 B regardless of N. The same fan-out in Combo 3 JSON is 3,464 B.
 **Regen commands:** every file under `target/diag-samples/**` is rewritten by the bench runner; the
 decoded views are produced by `diag-decode <blob>`.
 
+### The combos vs .NET — how the same operation looks
+
+To make the shapes concrete, here is the **same S2 operation** (`429` → `200`, two attempts) as each
+Rust design renders it, next to how .NET's Cosmos SDK renders diagnostics today. The three Rust
+samples are the **real outputs shown above**; the .NET block below is **illustrative and abridged** —
+it reproduces the *shape* of .NET V3 `CosmosDiagnostics.ToString()` (a deeply nested
+handler → transport → `StoreResult` tree with a roll-up `Summary` at the top), not exact bytes.
+
+**.NET today — `CosmosDiagnostics` (illustrative, abridged):**
+
+```json
+{
+  "Summary": { "GatewayCalls": { "(429, 0)": 1, "(200, 0)": 1 } },
+  "name": "ReadItemAsync",
+  "duration in milliseconds": 7.0,
+  "data": { "Client Configuration": "... ~30 fields elided ..." },
+  "children": [
+    { "name": "ItemSerialize", "duration in milliseconds": 0.1 },
+    {
+      "name": "Microsoft.Azure.Cosmos.Handlers.RequestInvokerHandler",
+      "children": [
+        {
+          "name": "Microsoft.Azure.Documents.ServerStoreModel Transport Request",
+          "duration in milliseconds": 3.0,
+          "data": { "Client Side Request Stats": { "StoreResponseStatistics": [
+            { "StoreResult": {
+                "ActivityId": "svc-429", "StatusCode": "TooManyRequests",
+                "SubStatusCode": "3200", "RequestCharge": "4.2" } } ] } }
+        },
+        {
+          "name": "Microsoft.Azure.Documents.ServerStoreModel Transport Request",
+          "duration in milliseconds": 4.0,
+          "data": { "Client Side Request Stats": { "StoreResponseStatistics": [
+            { "StoreResult": {
+                "ActivityId": "svc-200", "StatusCode": "OK",
+                "SubStatusCode": "0", "RequestCharge": "4.2" } } ] } }
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Reader experience, side by side (same S2 operation):**
+
+| Design | What you scroll through | Aggregatable summary? | Where the service id / status / RU live | Size |
+|---|---|---|---|--:|
+| **.NET `CosmosDiagnostics`** | Deep handler → transport tree; the `StoreResult` you usually want is several levels down | **Yes** — a `Summary` histogram block at the top | Inside each nested `StoreResult` | Large (often KBs) |
+| **Combo 3** (baseline JSON) | Flat-ish JSON: one object per attempt, plus per-attempt events | No (you aggregate yourself) | Top level of each `attempts[]` entry | 661 B |
+| **Combo 1** (decoded binary) | Flat node list linked by `parent` index | No (it *is* the full tree) | `attrs` on each attempt node | 432 B blob |
+| **Combo 2** (default summary) | A single flat record | **Yes** — the whole default output *is* the summary | Top-level fields | 339 B |
+
+**Field mapping (.NET `CosmosDiagnostics` → the Rust combos):**
+
+| .NET field | Combo 3 JSON | Combo 1 decoded node | Combo 2 summary |
+|---|---|---|---|
+| `Summary` calls histogram | derive from `attempts[]` | derive from nodes | `status_counts` (always present) |
+| `StoreResult.ActivityId` | `attempts[].service_request_id` | attr `az.service_request_id` | `final_service_request_id` / `top_error.service_request_id` |
+| `StoreResult.StatusCode` | `attempts[].status` | node `status` | `status_counts` keys / `top_error.status` |
+| `StoreResult.SubStatusCode` | not modeled (see `DIAGNOSTICS-SIGNALS.md`) | extensible attr | extensible (`top_error`) |
+| `StoreResult.RequestCharge` | `attempts[].request_charge` | attr `az.request_charge` | `total_request_charge` / `high_charge` |
+| `duration in milliseconds` | `duration_ns` | node `duration_ns` | `total_elapsed_ns` / `slow_attempt_ns` |
+| `children` (transport tree) | `attempts[]` + `children[]` | parent-linked nodes | `child_count` (full detail in the binary tier) |
+| retries (implicit in tree) | `attempt_count` | attr `az.attempt_count` | `retry_count` / `attempt_count` |
+
+**Takeaways:**
+
+- .NET's **`Summary` block is conceptually Combo 2's entire default output** — a flat, aggregatable
+  roll-up. That is exactly why Combo 2 is the migration-friendly path and .NET is the natural second
+  adopter: a .NET reader already thinks in "summary + drill-down".
+- .NET's **full nested tree is conceptually Combo 1's decoded blob** — the same information, but
+  Combo 1 ships it as a compact binary you only materialize on error or on demand, instead of
+  building the whole tree every time.
+- **Combo 3 sits in between**: one eager JSON object per call — easiest to map onto OpenTelemetry
+  spans, but the bulkiest and always-on, much like emitting the full .NET tree unconditionally.
+- Net: today's .NET experience is "always build the big tree, with a summary on top." The
+  recommended Rust direction (Combo 2 + Combo 1) keeps the **summary as the cheap default** and makes
+  the **big tree an opt-in, compact, on-error artifact**.
+
 ---
 
 ## 7. Scorecard (1 = poor, 5 = excellent)
+
+> Reminder of the labels (full descriptions in the Reader's guide): **Combo 3** = baseline
+> ("everything, always, as JSON"); **Combo 1** = binary span tree ("full detail, compact, only when
+> needed"); **Combo 2** = tiered ("cheap summary by default, full detail on demand").
 
 | Criterion | Combo 3 | Combo 1 | Combo 2 |
 |---|:--:|:--:|:--:|
