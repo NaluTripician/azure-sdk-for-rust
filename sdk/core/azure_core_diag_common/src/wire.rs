@@ -131,7 +131,9 @@ impl WireTree {
     }
 }
 
-fn write_varint(out: &mut Vec<u8>, mut value: u64) {
+/// Appends `value` to `out` as an LEB128 unsigned varint. Shared by the wire codec and by
+/// append-only capture logs (e.g. Combo 4) so the two never diverge.
+pub fn write_varint(out: &mut Vec<u8>, mut value: u64) {
     loop {
         let mut byte = (value & 0x7f) as u8;
         value >>= 7;
@@ -145,7 +147,8 @@ fn write_varint(out: &mut Vec<u8>, mut value: u64) {
     }
 }
 
-fn read_varint(input: &[u8], pos: &mut usize) -> Result<u64, DecodeError> {
+/// Reads an LEB128 unsigned varint from `input` at `pos`, advancing `pos`.
+pub fn read_varint(input: &[u8], pos: &mut usize) -> Result<u64, DecodeError> {
     let mut result: u64 = 0;
     let mut shift = 0;
     loop {
@@ -163,12 +166,14 @@ fn read_varint(input: &[u8], pos: &mut usize) -> Result<u64, DecodeError> {
     Ok(result)
 }
 
-fn write_str(out: &mut Vec<u8>, value: &str) {
+/// Appends `value` to `out` as a varint length prefix followed by its UTF-8 bytes.
+pub fn write_str(out: &mut Vec<u8>, value: &str) {
     write_varint(out, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
 
-fn read_str(input: &[u8], pos: &mut usize) -> Result<String, DecodeError> {
+/// Reads a length-prefixed UTF-8 string from `input` at `pos`, advancing `pos`.
+pub fn read_str(input: &[u8], pos: &mut usize) -> Result<String, DecodeError> {
     let len = read_varint(input, pos)? as usize;
     let end = pos.checked_add(len).ok_or(DecodeError::UnexpectedEof)?;
     let bytes = input.get(*pos..end).ok_or(DecodeError::UnexpectedEof)?;

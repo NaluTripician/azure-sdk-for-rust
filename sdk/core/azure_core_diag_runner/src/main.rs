@@ -212,6 +212,145 @@ fn bench_combo2(name: &str, input: &OperationInput) -> Combo2Out {
     }
 }
 
+struct Combo4Out {
+    rows: Vec<BenchRow>,
+    summary_pretty: Vec<u8>,
+    detailed_blob: Vec<u8>,
+    /// Whether the example policy built (true) or dropped (false) this scenario.
+    built: bool,
+}
+
+fn bench_combo4(name: &str, input: &OperationInput) -> Combo4Out {
+    use azure_core_diag_combo4 as c4;
+    // Example policy: build on error, or when an op exceeds 5 ms; binary opt-in.
+    let policy = c4::DiagnosticsPolicy {
+        mode: c4::Mode::Threshold,
+        latency_threshold_ns: Some(5_000_000),
+        capture_on_error: true,
+        binary: true,
+    };
+
+    // Pool reused across iterations so the "drop" path measures rent+append+return.
+    // collect+discard cycle (the dropped / happy-path cost).
+    let mut pool_a = c4::LogPool::new();
+    let t_drop = bench(|| {
+        let clock = MockClock::new();
+        let log = c4::collect(&mut pool_a, input, &clock);
+        c4::discard(&mut pool_a, log);
+    });
+    // rent+return only (no append) -> isolates pool overhead so collect = t_drop - t_noop.
+    let mut pool_b = c4::LogPool::new();
+    let t_noop = bench(|| {
+        let clock = MockClock::new();
+        let log = c4::collect(&mut pool_b, &noop_input(), &clock);
+        c4::discard(&mut pool_b, log);
+    });
+    let collect_ns = (t_drop.median_ns - t_noop.median_ns).max(0.0);
+    let discard_ns = t_noop.median_ns;
+
+    // Build-summary cost (parse + reduce + json), measured as a delta over the drop cycle.
+    let mut pool_c = c4::LogPool::new();
+    let t_sum = bench(|| {
+        let clock = MockClock::new();
+        let log = c4::collect(&mut pool_c, input, &clock);
+        black_box(c4::build_summary(&log));
+        c4::discard(&mut pool_c, log);
+    });
+    let mut pool_cj = c4::LogPool::new();
+    let t_sum_json = bench(|| {
+        let clock = MockClock::new();
+        let log = c4::collect(&mut pool_cj, input, &clock);
+        let s = c4::build_summary(&log);
+        black_box(c4::to_summary_json(&s));
+        c4::discard(&mut pool_cj, log);
+    });
+    let sum_construct = (t_sum.median_ns - t_drop.median_ns).max(0.0);
+    let sum_serialize = (t_sum_json.median_ns - t_sum.median_ns).max(0.0);
+
+    // Build-detailed cost (parse + wiretree + encode).
+    let mut pool_d = c4::LogPool::new();
+    let t_det = bench(|| {
+        let clock = MockClock::new();
+        let log = c4::collect(&mut pool_d, input, &clock);
+        black_box(c4::build_detailed_blob(&log));
+        c4::discard(&mut pool_d, log);
+    });
+    let det_build = (t_det.median_ns - t_drop.median_ns).max(0.0);
+
+    // Concrete artifacts under the example policy.
+    let mut pool = c4::LogPool::new();
+    let clock = MockClock::new();
+    let rendered = c4::capture_and_gate(&mut pool, input, &clock, &policy);
+    let built = !rendered.is_dropped();
+
+    let clock = MockClock::new();
+    let log = c4::collect(&mut pool, input, &clock);
+    let summary = c4::build_summary(&log);
+    let summary_pretty = c4::to_summary_json_pretty(&summary).into_bytes();
+    let summary_json = c4::to_summary_json(&summary);
+    let detailed_blob = c4::build_detailed_blob(&log);
+    c4::discard(&mut pool, log);
+
+    let t_dec = bench(|| {
+        black_box(azure_core_diag_common::decode(&detailed_blob).unwrap());
+    });
+
+    let rows = vec![
+        // The gated-away path: what an op pays when we decide we don't want diagnostics.
+        BenchRow {
+            combo: "combo4".into(),
+            scenario: name.into(),
+            mode: "dropped".into(),
+            collect_ns,
+            construct_ns: 0.0,
+            serialize_ns: 0.0,
+            decode_ns: 0.0,
+            discard_ns,
+            output_bytes: 0,
+        },
+        BenchRow {
+            combo: "combo4".into(),
+            scenario: name.into(),
+            mode: "summary".into(),
+            collect_ns,
+            construct_ns: sum_construct,
+            serialize_ns: sum_serialize,
+            decode_ns: 0.0,
+            discard_ns: 0.0,
+            output_bytes: summary_json.len(),
+        },
+        BenchRow {
+            combo: "combo4".into(),
+            scenario: name.into(),
+            mode: "detailed".into(),
+            collect_ns,
+            construct_ns: det_build,
+            serialize_ns: 0.0,
+            decode_ns: t_dec.median_ns,
+            discard_ns: 0.0,
+            output_bytes: detailed_blob.len(),
+        },
+    ];
+
+    Combo4Out {
+        rows,
+        summary_pretty,
+        detailed_blob,
+        built,
+    }
+}
+
+/// A trivial input used to isolate pool rent/return overhead from the append work.
+fn noop_input() -> OperationInput {
+    OperationInput {
+        name: "noop",
+        endpoint: "https://noop",
+        client_request_id: "noop",
+        attempts: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
 fn multipliers_md(rows: &[BenchRow]) -> String {
     use std::collections::BTreeMap;
     // base = combo3 json bytes per scenario.
@@ -277,6 +416,48 @@ fn happy_path_md(rows: &[BenchRow]) -> String {
             r.full_cost_ns()
         ));
     }
+    if let Some(r) = find("combo4", "dropped") {
+        out.push_str(&format!(
+            "| Combo 4 (gated, dropped) | {:.0} | collect ({:.0}) + return to pool ({:.0}); **built nothing** |\n",
+            r.collect_ns + r.discard_ns,
+            r.collect_ns,
+            r.discard_ns
+        ));
+    }
+    out
+}
+
+/// Shows the gate deciding per scenario under the example policy, with the dropped vs built costs.
+fn gate_md(rows: &[BenchRow], decisions: &[(&str, bool)]) -> String {
+    let find = |scenario: &str, mode: &str| {
+        rows.iter()
+            .find(|r| r.scenario == scenario && r.combo == "combo4" && r.mode == mode)
+            .cloned()
+    };
+    let mut out = String::new();
+    out.push_str("\n## Combo 4 — the gate in action (policy: build on error OR > 5 ms)\n\n");
+    out.push_str(
+        "Hot-path `collect` is paid always; everything else only when the gate says build.\n\n",
+    );
+    out.push_str("| Scenario | Gate decision | collect ns | if dropped: +discard ns | if built: +construct+serialize ns | summary bytes | detailed bytes |\n");
+    out.push_str("|---|---|--:|--:|--:|--:|--:|\n");
+    for (scenario, built) in decisions {
+        let dropped = find(scenario, "dropped");
+        let summary = find(scenario, "summary");
+        let detailed = find(scenario, "detailed");
+        let collect = dropped.as_ref().map(|r| r.collect_ns).unwrap_or(0.0);
+        let discard = dropped.as_ref().map(|r| r.discard_ns).unwrap_or(0.0);
+        let build = summary
+            .as_ref()
+            .map(|r| r.construct_ns + r.serialize_ns)
+            .unwrap_or(0.0);
+        let sum_bytes = summary.as_ref().map(|r| r.output_bytes).unwrap_or(0);
+        let det_bytes = detailed.as_ref().map(|r| r.output_bytes).unwrap_or(0);
+        let decision = if *built { "**build**" } else { "drop (free)" };
+        out.push_str(&format!(
+            "| {scenario} | {decision} | {collect:.0} | {discard:.0} | {build:.0} | {sum_bytes} | {det_bytes} |\n"
+        ));
+    }
     out
 }
 
@@ -299,6 +480,7 @@ fn main() -> io::Result<()> {
     );
 
     let mut rows: Vec<BenchRow> = Vec::new();
+    let mut gate_decisions: Vec<(&str, bool)> = Vec::new();
     let base = harness::samples_dir();
 
     for (name, input) in scenarios() {
@@ -332,6 +514,23 @@ fn main() -> io::Result<()> {
         )?;
         rows.push(c2.summary_row);
         rows.push(c2.detailed_row);
+
+        // Combo 4 (deferred, threshold-gated capture).
+        let c4 = bench_combo4(name, &input);
+        harness::dump_sample_in(&base, "combo4", name, "summary.json", &c4.summary_pretty)?;
+        harness::dump_sample_in(&base, "combo4", name, "detailed.bin", &c4.detailed_blob)?;
+        let decoded4 = azure_core_diag_common::decode(&c4.detailed_blob)
+            .map(|t| serde_json::to_string_pretty(&t).unwrap())
+            .unwrap_or_else(|e| format!("decode error: {e}"));
+        harness::dump_sample_in(
+            &base,
+            "combo4",
+            name,
+            "detailed.decoded.json",
+            decoded4.as_bytes(),
+        )?;
+        gate_decisions.push((name, c4.built));
+        rows.extend(c4.rows);
     }
 
     // Write the CSV at the repo root.
@@ -341,15 +540,16 @@ fn main() -> io::Result<()> {
     let table = harness::results_md_table(&rows);
     let multipliers = multipliers_md(&rows);
     let happy = happy_path_md(&rows);
+    let gate = gate_md(&rows, &gate_decisions);
     std::fs::write(base.join("_bench-table.md"), &table)?;
     std::fs::write(
         base.join("_multipliers.md"),
-        format!("{multipliers}{happy}"),
+        format!("{multipliers}{happy}{gate}"),
     )?;
 
     println!("\n=== Diagnostics bench ===\n");
     println!("{table}");
-    println!("{multipliers}{happy}");
+    println!("{multipliers}{happy}{gate}");
     println!(
         "Wrote DIAGNOSTICS-BENCH.csv ({} rows) and samples under {}",
         rows.len(),

@@ -4,9 +4,9 @@
 # Spike crate for diagnostics design exploration. Not published.
 
 [package]
-name = "azure_core_diag_runner"
+name = "azure_core_diag_combo4"
 version = "0.1.0"
-description = "Runner that benchmarks the diagnostics combos, emits the comparison CSV, and dumps the sample gallery."
+description = "Combo 4 diagnostics spike: deferred, threshold-gated capture (pooled append-only log, build only when wanted)."
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,17 +14,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[[bin]]
-name = "diag-bench"
-path = "src/main.rs"
-
 [dependencies]
+azure_core.workspace = true
 azure_core_diag_common = { path = "../azure_core_diag_common" }
-azure_core_diag_combo1 = { path = "../azure_core_diag_combo1" }
-azure_core_diag_combo2 = { path = "../azure_core_diag_combo2" }
-azure_core_diag_combo3 = { path = "../azure_core_diag_combo3" }
-azure_core_diag_combo4 = { path = "../azure_core_diag_combo4" }
+serde = { workspace = true }
 serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true

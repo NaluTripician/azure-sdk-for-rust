@@ -16,6 +16,7 @@ members = [
   "sdk/core/azure_core_diag_combo3",
   "sdk/core/azure_core_diag_combo1",
   "sdk/core/azure_core_diag_combo2",
+  "sdk/core/azure_core_diag_combo4",
   "sdk/core/azure_core_diag_runner",
   "sdk/cosmos/azure_data_cosmos",
   "sdk/cosmos/azure_data_cosmos_driver",
