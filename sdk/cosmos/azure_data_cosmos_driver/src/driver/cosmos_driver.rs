@@ -4,10 +4,11 @@
 //! Cosmos DB driver instance.
 
 use crate::{
+    diagnostics::{finish, DiagnosticsRecorder, LogPool, Mode, Outcome},
     models::{
         AccountEndpoint, AccountReference, ActivityId, ContainerProperties, ContainerReference,
         CosmosOperation, CosmosResponse, CosmosResponseHeaders, CosmosStatus, DatabaseProperties,
-        DatabaseReference,
+        DatabaseReference, RequestCharge,
     },
     options::{
         DriverOptions, OperationOptions, Region, RuntimeOptions, ThroughputControlGroupSnapshot,
@@ -15,6 +16,7 @@ use crate::{
 };
 use azure_core::http::headers::{HeaderName, HeaderValue};
 use azure_core::http::{Context, Request};
+use std::time::Instant;
 
 use super::{
     transport::{uses_dataplane_pipeline, AuthorizationContext, RequestSentExt, RequestSentStatus},
@@ -36,6 +38,8 @@ pub struct CosmosDriver {
     runtime: CosmosDriverRuntime,
     /// Driver-level options including account reference.
     options: DriverOptions,
+    /// Shared, bounded pool of reusable diagnostics capture buffers.
+    diagnostics_pool: LogPool,
 }
 
 impl CosmosDriver {
@@ -52,7 +56,11 @@ impl CosmosDriver {
     ///
     /// This is internal - use [`CosmosDriverRuntime::get_or_create_driver()`] instead.
     pub(crate) fn new(runtime: CosmosDriverRuntime, options: DriverOptions) -> Self {
-        Self { runtime, options }
+        Self {
+            runtime,
+            options,
+            diagnostics_pool: LogPool::new(),
+        }
     }
 
     /// Returns the account reference.
@@ -237,6 +245,19 @@ impl CosmosDriver {
         const MAX_TRANSPORT_RETRIES: usize = 1;
         let mut attempt = 0usize;
 
+        // Step 10a: Start diagnostics capture (operation-layer-owned, lock-free `&mut` recorder).
+        // When diagnostics are off (the default) no recorder is created, so the path is free.
+        let diag_policy = self.options.diagnostics_policy();
+        let mut recorder = (diag_policy.mode != Mode::Off).then(|| {
+            let op_name = format!("{operation_type:?} {resource_type:?}");
+            DiagnosticsRecorder::start(
+                &self.diagnostics_pool,
+                &op_name,
+                url.as_str(),
+                activity_id.as_str(),
+            )
+        });
+
         loop {
             let mut request = Request::new(url.clone(), method);
 
@@ -274,24 +295,66 @@ impl CosmosDriver {
             let mut ctx = Context::default();
             ctx.insert(auth_context.clone());
 
+            // Per-attempt timing (relative to the operation start), captured only when recording.
+            let attempt_start_ns = recorder.as_ref().map_or(0, DiagnosticsRecorder::elapsed_ns);
+            let attempt_timer = recorder.as_ref().map(|_| Instant::now());
+            let attempt_ns = || {
+                attempt_timer.map_or(0, |t| {
+                    t.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+                })
+            };
+
             let result = pipeline.send(&ctx, &mut request).await;
 
             match result {
                 Ok(response) => {
                     let status_code = response.status();
+                    let status_u16 = u16::from(status_code);
                     let cosmos_headers = CosmosResponseHeaders::from_headers(response.headers());
                     let sub_status = cosmos_headers.substatus;
 
-                    let body = response.into_body();
                     let status = CosmosStatus::from_parts(status_code, sub_status);
 
-                    return Ok(CosmosResponse::new(
-                        body.as_ref().to_vec(),
-                        cosmos_headers,
-                        status,
-                    ));
+                    // Gate diagnostics: an Ok(response) is terminal for this slim loop (status-
+                    // based retries live elsewhere), so finalize here.
+                    let rendered = recorder.take().map(|mut rec| {
+                        rec.record_attempt(
+                            attempt as u32,
+                            status_u16,
+                            cosmos_headers.activity_id.as_ref().map(ActivityId::as_str),
+                            cosmos_headers.request_charge.map(RequestCharge::value),
+                            attempt_start_ns,
+                            attempt_ns(),
+                        );
+                        let outcome = if status.is_success() {
+                            Outcome::Success
+                        } else {
+                            Outcome::Error
+                        };
+                        rec.record_end(outcome, attempt as u32 + 1, None);
+                        finish(rec, &diag_policy)
+                    });
+
+                    let body = response.into_body();
+
+                    return Ok(
+                        CosmosResponse::new(body.as_ref().to_vec(), cosmos_headers, status)
+                            .with_diagnostics(rendered),
+                    );
                 }
                 Err(e) => {
+                    // Record the failed transport attempt (no status / service id / RU available).
+                    if let Some(rec) = recorder.as_mut() {
+                        rec.record_attempt(
+                            attempt as u32,
+                            0,
+                            None,
+                            None,
+                            attempt_start_ns,
+                            attempt_ns(),
+                        );
+                    }
+
                     let request_sent = e.request_sent_status();
 
                     let should_retry = Self::should_retry_transport_failure(
@@ -304,6 +367,19 @@ impl CosmosDriver {
                     if should_retry {
                         attempt += 1;
                         continue;
+                    }
+
+                    // Terminal transport failure. The error path has nowhere to attach a
+                    // CosmosResponse, so emit the built summary via tracing for live-site triage.
+                    if let Some(mut rec) = recorder.take() {
+                        rec.record_end(Outcome::Error, attempt as u32 + 1, None);
+                        if let Some(summary) = finish(rec, &diag_policy).summary() {
+                            tracing::debug!(
+                                target: "azure_data_cosmos_driver::diagnostics",
+                                diagnostics = %String::from_utf8_lossy(&summary.to_json()),
+                                "operation failed at transport layer",
+                            );
+                        }
                     }
 
                     return Err(e);

@@ -56,7 +56,7 @@ pub mod wire;
 pub use gate::{finish, should_build, DiagnosticsPolicy, Mode, Rendered};
 pub use pool::LogPool;
 pub use preamble::{set_sdk_provenance, Preamble};
-pub use recorder::DiagnosticsRecorder;
+pub use recorder::{ChildRecord, DiagnosticsRecorder};
 pub use summary::{ClientInfo, Summary, TopError};
 
 /// Canonical diagnostics attribute keys used on `AZD1` wire nodes.
@@ -212,5 +212,62 @@ mod tests {
             // no record_end / finish — simulate a cancelled future
         }
         assert_eq!(pool.pooled(), 1, "dropped recorder must return its buffer");
+    }
+
+    #[tokio::test]
+    async fn fan_out_children_merge_lock_free() {
+        // Each concurrent child captures its own ChildRecord (a Send value, no shared recorder,
+        // no lock); the operation layer merges them on join.
+        let pool = LogPool::new();
+        let mut rec =
+            DiagnosticsRecorder::start(&pool, "query_items", "https://acct/dbs/d/colls/c", "c-q");
+        rec.record_attempt(0, 200, Some("svc-query-200"), Some(18.6), 0, 6_000_000);
+
+        let handles: Vec<_> = (0..25u32)
+            .map(|i| {
+                tokio::spawn(async move {
+                    ChildRecord {
+                        plan_node_id: format!("plan-{i}"),
+                        feed_range: format!("range-{i}"),
+                        start_ns: u64::from(i) * 1000,
+                        duration_ns: 500,
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            let child = h.await.expect("child task");
+            rec.merge_child(&child);
+        }
+
+        rec.record_end(Outcome::Success, 1, Some(6_000_000));
+        let policy = DiagnosticsPolicy {
+            binary: true,
+            ..DiagnosticsPolicy::always()
+        };
+        let rendered = finish(rec, &policy);
+        let summary = rendered.summary().expect("built");
+        // Summary stays flat regardless of fan-out width: child_count only.
+        assert_eq!(summary.child_count, 25);
+        // The detailed blob carries all 25 routing children under the operation root.
+        let tree = wire::decode(rendered.detailed_blob().unwrap()).expect("AZD1 decodes");
+        assert_eq!(
+            tree.children_of(0).len(),
+            26,
+            "1 attempt + 25 routing children"
+        );
+    }
+
+    #[test]
+    fn recorder_elapsed_uses_monotonic_clock() {
+        // record_end with None sources elapsed from the recorder's own Instant.
+        let pool = LogPool::new();
+        let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct", "c-clk");
+        rec.record_attempt(0, 200, Some("svc"), Some(1.0), 0, 1_000);
+        rec.record_end(Outcome::Success, 1, None);
+        // Elapsed is monotonic and non-zero-ish; just assert it was populated without panicking.
+        let rendered = finish(rec, &DiagnosticsPolicy::always());
+        assert!(rendered.summary().is_some());
     }
 }

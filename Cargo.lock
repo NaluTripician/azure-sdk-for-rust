@@ -446,6 +446,8 @@ dependencies = [
  "azure_core",
  "azure_identity",
  "base64",
+ "criterion",
+ "flate2",
  "futures",
  "reqwest",
  "serde",

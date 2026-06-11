@@ -3,6 +3,7 @@
 
 //! Cosmos DB operation result types.
 
+use crate::diagnostics::Rendered;
 use crate::models::{CosmosResponseHeaders, CosmosStatus};
 
 /// Result of a Cosmos DB operation.
@@ -40,6 +41,12 @@ pub struct CosmosResponse {
 
     /// Operation status including HTTP status code and optional sub-status.
     status: CosmosStatus,
+
+    /// Captured diagnostics, present only when the diagnostics gate built them
+    /// (the operation was slow or errored under an opt-in [`DiagnosticsPolicy`]).
+    ///
+    /// [`DiagnosticsPolicy`]: crate::diagnostics::DiagnosticsPolicy
+    diagnostics: Option<Rendered>,
 }
 
 impl CosmosResponse {
@@ -51,7 +58,14 @@ impl CosmosResponse {
             body,
             headers,
             status,
+            diagnostics: None,
         }
+    }
+
+    /// Attaches captured diagnostics to the response (builder-style).
+    pub(crate) fn with_diagnostics(mut self, diagnostics: Option<Rendered>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 
     /// Returns a reference to the response body.
@@ -75,6 +89,14 @@ impl CosmosResponse {
     /// Returns the operation status.
     pub fn status(&self) -> CosmosStatus {
         self.status
+    }
+
+    /// Returns the captured diagnostics, if the gate built them for this operation.
+    ///
+    /// `None` when diagnostics are off, or when the operation was a fast success that the
+    /// gate dropped.
+    pub fn diagnostics(&self) -> Option<&Rendered> {
+        self.diagnostics.as_ref()
     }
 }
 

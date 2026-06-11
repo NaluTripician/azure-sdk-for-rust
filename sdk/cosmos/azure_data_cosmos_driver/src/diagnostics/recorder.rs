@@ -36,6 +36,22 @@ enum Tag {
     End = 4,
 }
 
+/// A fan-out child captured by a concurrent task, merged at the operation layer on join.
+///
+/// Carrying plain values (not a shared recorder) keeps per-task capture lock-free for concurrent
+/// cross-partition children. See [`DiagnosticsRecorder::merge_child`].
+#[derive(Clone, Debug)]
+pub struct ChildRecord {
+    /// Query-plan node id for this child.
+    pub plan_node_id: String,
+    /// Feed range this child addresses.
+    pub feed_range: String,
+    /// Start (nanoseconds) relative to the operation start.
+    pub start_ns: u64,
+    /// Child duration (nanoseconds).
+    pub duration_ns: u64,
+}
+
 /// A per-operation append-only capture recorder.
 ///
 /// Construct one with [`DiagnosticsRecorder::start`], append per-attempt/child records as the
@@ -127,6 +143,21 @@ impl DiagnosticsRecorder {
         wire::write_str(buf, feed_range);
         wire::write_varint(buf, start_ns);
         wire::write_varint(buf, duration_ns);
+    }
+
+    /// Merges a [`ChildRecord`] captured by a concurrent fan-out task at join time.
+    ///
+    /// Per the fan-out design, concurrent cross-partition children do **not** share the
+    /// single-owner `&mut` recorder. Each child task captures its own values into a plain
+    /// [`ChildRecord`] (a `Send` value, no shared state, no lock) and the operation layer merges
+    /// them here once the children join — keeping per-task capture lock-free.
+    pub fn merge_child(&mut self, child: &ChildRecord) {
+        self.record_child(
+            &child.plan_node_id,
+            &child.feed_range,
+            child.start_ns,
+            child.duration_ns,
+        );
     }
 
     /// Records the operation outcome and finalizes the log header.
