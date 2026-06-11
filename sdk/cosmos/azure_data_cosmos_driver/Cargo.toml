@@ -22,6 +22,7 @@ azure_core = { workspace = true, features = [
   "hmac_rust",
 ] }
 base64.workspace = true
+flate2.workspace = true
 futures.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde.workspace = true

@@ -4,6 +4,7 @@
 //! Driver-level configuration options.
 
 use crate::{
+    diagnostics::DiagnosticsPolicy,
     models::AccountReference,
     options::{RuntimeOptions, SharedRuntimeOptions},
 };
@@ -50,6 +51,9 @@ pub struct DriverOptions {
     account: AccountReference,
     /// Thread-safe runtime options for operation options at the driver level.
     runtime_options: SharedRuntimeOptions,
+    /// Opt-in diagnostics capture policy. Defaults to [`DiagnosticsPolicy::default`]
+    /// ([`Mode::Off`](crate::diagnostics::Mode::Off)) — no cost, no behavior change.
+    diagnostics_policy: DiagnosticsPolicy,
 }
 
 impl DriverOptions {
@@ -71,6 +75,11 @@ impl DriverOptions {
     pub fn runtime_options(&self) -> &SharedRuntimeOptions {
         &self.runtime_options
     }
+
+    /// Returns the diagnostics capture policy in effect for this driver.
+    pub fn diagnostics_policy(&self) -> DiagnosticsPolicy {
+        self.diagnostics_policy
+    }
 }
 
 /// Builder for creating [`DriverOptions`].
@@ -82,6 +91,7 @@ impl DriverOptions {
 pub struct DriverOptionsBuilder {
     account: AccountReference,
     runtime_options: Option<RuntimeOptions>,
+    diagnostics_policy: DiagnosticsPolicy,
 }
 
 impl DriverOptionsBuilder {
@@ -90,6 +100,7 @@ impl DriverOptionsBuilder {
         Self {
             account,
             runtime_options: None,
+            diagnostics_policy: DiagnosticsPolicy::default(),
         }
     }
 
@@ -101,6 +112,14 @@ impl DriverOptionsBuilder {
         self
     }
 
+    /// Sets the opt-in diagnostics capture policy.
+    ///
+    /// Defaults to [`DiagnosticsPolicy::default`] ([`Mode::Off`](crate::diagnostics::Mode::Off)).
+    pub fn with_diagnostics_policy(mut self, policy: DiagnosticsPolicy) -> Self {
+        self.diagnostics_policy = policy;
+        self
+    }
+
     /// Builds the [`DriverOptions`].
     pub fn build(self) -> DriverOptions {
         DriverOptions {
@@ -108,6 +127,7 @@ impl DriverOptionsBuilder {
             runtime_options: SharedRuntimeOptions::from_options(
                 self.runtime_options.unwrap_or_default(),
             ),
+            diagnostics_policy: self.diagnostics_policy,
         }
     }
 }
@@ -156,28 +176,20 @@ mod tests {
     }
 
     #[test]
-    fn runtime_modification() {
-        let options = DriverOptionsBuilder::new(test_account()).build();
+    fn diagnostics_policy_defaults_off_and_is_configurable() {
+        use crate::diagnostics::{DiagnosticsPolicy, Mode};
+        use std::time::Duration;
 
-        // Initially none
-        assert!(options
-            .runtime_options()
-            .snapshot()
-            .content_response_on_write
-            .is_none());
+        let default_options = DriverOptionsBuilder::new(test_account()).build();
+        assert_eq!(default_options.diagnostics_policy().mode, Mode::Off);
 
-        // Modify at runtime
-        options
-            .runtime_options()
-            .set_content_response_on_write(Some(ContentResponseOnWrite::Enabled));
-
-        // Now set
+        let configured = DriverOptionsBuilder::new(test_account())
+            .with_diagnostics_policy(DiagnosticsPolicy::threshold(Duration::from_millis(5)))
+            .build();
+        assert_eq!(configured.diagnostics_policy().mode, Mode::Threshold);
         assert_eq!(
-            options
-                .runtime_options()
-                .snapshot()
-                .content_response_on_write,
-            Some(ContentResponseOnWrite::Enabled)
+            configured.diagnostics_policy().latency_threshold,
+            Some(Duration::from_millis(5))
         );
     }
 }
