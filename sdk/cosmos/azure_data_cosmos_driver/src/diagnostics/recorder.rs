@@ -105,13 +105,43 @@ impl DiagnosticsRecorder {
     ///
     /// `service_request_id` is read from the **response** (Cosmos `x-ms-request-id` /
     /// activity id); `request_charge` is the per-attempt RU. Both are `None` when unavailable
-    /// (e.g. a transport failure before a response).
+    /// (e.g. a transport failure before a response). For sub-status / request-sent detail use
+    /// [`DiagnosticsRecorder::record_attempt_ext`].
     pub fn record_attempt(
         &mut self,
         attempt_index: u32,
         status: u16,
         service_request_id: Option<&str>,
         request_charge: Option<f64>,
+        start_ns: u64,
+        duration_ns: u64,
+    ) {
+        self.record_attempt_ext(
+            attempt_index,
+            status,
+            service_request_id,
+            request_charge,
+            None,
+            None,
+            start_ns,
+            duration_ns,
+        );
+    }
+
+    /// Records one HTTP attempt with Cosmos detail (`sub_status`, `request_sent`).
+    ///
+    /// `sub_status` is the Cosmos `x-ms-substatus` (finer error classification, available on the
+    /// response path); `request_sent` is the retry-safety signal on a transport failure
+    /// (`"sent"` / `"not_sent"` / `"unknown"`). Both are `None`/absent when not applicable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_attempt_ext(
+        &mut self,
+        attempt_index: u32,
+        status: u16,
+        service_request_id: Option<&str>,
+        request_charge: Option<f64>,
+        sub_status: Option<u16>,
+        request_sent: Option<&str>,
         start_ns: u64,
         duration_ns: u64,
     ) {
@@ -125,6 +155,9 @@ impl DiagnosticsRecorder {
         buf.extend_from_slice(&(request_charge.unwrap_or(0.0) as f32).to_le_bytes());
         wire::write_varint(buf, start_ns);
         wire::write_varint(buf, duration_ns);
+        // sub_status: 0 == none, else value + 1 (sub-status 0 is a valid Cosmos code).
+        wire::write_varint(buf, sub_status.map_or(0, |s| u64::from(s) + 1));
+        wire::write_str(buf, request_sent.unwrap_or_default());
     }
 
     /// Records one fan-out child (per partition / feed range). `start_ns` is relative to op start.
@@ -226,6 +259,8 @@ pub(crate) struct ParsedAttempt {
     pub status: u16,
     pub service_request_id: String,
     pub request_charge: f32,
+    pub sub_status: Option<u16>,
+    pub request_sent: String,
     pub start_ns: u64,
     pub duration_ns: u64,
 }
@@ -289,11 +324,17 @@ pub(crate) fn parse(buf: &[u8]) -> Parsed {
                 let request_charge = f32::from_le_bytes(ru_bytes);
                 let start_ns = wire::read_varint(buf, &mut pos).unwrap_or(0);
                 let duration_ns = wire::read_varint(buf, &mut pos).unwrap_or(0);
+                let raw_sub = wire::read_varint(buf, &mut pos).unwrap_or(0);
+                let sub_status =
+                    (raw_sub != 0).then(|| (raw_sub - 1).min(u64::from(u16::MAX)) as u16);
+                let request_sent = wire::read_str(buf, &mut pos).unwrap_or_default();
                 p.attempts.push(ParsedAttempt {
                     index,
                     status,
                     service_request_id,
                     request_charge,
+                    sub_status,
+                    request_sent,
                     start_ns,
                     duration_ns,
                 });

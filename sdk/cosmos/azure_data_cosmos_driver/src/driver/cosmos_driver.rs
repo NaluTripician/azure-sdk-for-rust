@@ -318,11 +318,13 @@ impl CosmosDriver {
                     // Gate diagnostics: an Ok(response) is terminal for this slim loop (status-
                     // based retries live elsewhere), so finalize here.
                     let rendered = recorder.take().map(|mut rec| {
-                        rec.record_attempt(
+                        rec.record_attempt_ext(
                             attempt as u32,
                             status_u16,
                             cosmos_headers.activity_id.as_ref().map(ActivityId::as_str),
                             cosmos_headers.request_charge.map(RequestCharge::value),
+                            sub_status.map(|s| s.value().min(u32::from(u16::MAX)) as u16),
+                            None,
                             attempt_start_ns,
                             attempt_ns(),
                         );
@@ -343,19 +345,27 @@ impl CosmosDriver {
                     );
                 }
                 Err(e) => {
-                    // Record the failed transport attempt (no status / service id / RU available).
+                    let request_sent = e.request_sent_status();
+
+                    // Record the failed transport attempt (no status / service id / RU available);
+                    // carry the retry-safety signal for the summary/detail.
                     if let Some(rec) = recorder.as_mut() {
-                        rec.record_attempt(
+                        let request_sent_str = match request_sent {
+                            RequestSentStatus::Sent => "sent",
+                            RequestSentStatus::NotSent => "not_sent",
+                            RequestSentStatus::Unknown => "unknown",
+                        };
+                        rec.record_attempt_ext(
                             attempt as u32,
                             0,
                             None,
                             None,
+                            None,
+                            Some(request_sent_str),
                             attempt_start_ns,
                             attempt_ns(),
                         );
                     }
-
-                    let request_sent = e.request_sent_status();
 
                     let should_retry = Self::should_retry_transport_failure(
                         attempt,

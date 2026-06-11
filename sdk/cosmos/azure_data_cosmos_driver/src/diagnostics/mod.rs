@@ -71,6 +71,10 @@ pub(crate) mod attrs {
     pub const ATTR_CLIENT_REQUEST_ID: &str = "az.client_request_id";
     /// HTTP status code.
     pub const ATTR_STATUS_CODE: &str = "az.status_code";
+    /// Cosmos sub-status code (finer error classification).
+    pub const ATTR_SUB_STATUS: &str = "az.sub_status";
+    /// Retry-safety signal on a transport failure (`sent` / `not_sent` / `unknown`).
+    pub const ATTR_REQUEST_SENT: &str = "az.request_sent";
     /// Coarse error classification.
     pub const ATTR_ERROR_KIND: &str = "az.error_kind";
     /// Request charge in Request Units (RU).
@@ -327,5 +331,48 @@ mod tests {
         // tier grows with the children.
         assert!(fanout_summary_bytes < fanout_detail_bytes);
         assert!(s2_summary_bytes > 0);
+    }
+
+    #[test]
+    fn attempt_ext_captures_sub_status_and_request_sent() {
+        let pool = LogPool::new();
+        let mut rec = DiagnosticsRecorder::start(&pool, "create_item", "https://acct/d/c", "c-ext");
+        // A throttle with a Cosmos sub-status, then a transport failure (request not sent).
+        rec.record_attempt_ext(
+            0,
+            429,
+            Some("svc-429"),
+            Some(4.2),
+            Some(3200),
+            None,
+            0,
+            1_000_000,
+        );
+        rec.record_attempt_ext(1, 0, None, None, None, Some("not_sent"), 1_000_000, 2_000);
+        rec.record_end(Outcome::Error, 2, Some(1_002_000));
+        let policy = DiagnosticsPolicy {
+            binary: true,
+            ..DiagnosticsPolicy::always()
+        };
+        let rendered = finish(rec, &policy);
+        let top = rendered.summary().unwrap().top_error.as_ref().unwrap();
+        assert_eq!(top.status, 429);
+        assert_eq!(top.sub_status, Some(3200));
+
+        // The detail tier carries the sub-status and request-sent attributes.
+        let tree = wire::decode(rendered.detailed_blob().unwrap()).unwrap();
+        let has_sub = tree
+            .nodes
+            .iter()
+            .any(|n| n.attr("az.sub_status") == Some("3200"));
+        let has_sent = tree
+            .nodes
+            .iter()
+            .any(|n| n.attr("az.request_sent") == Some("not_sent"));
+        assert!(has_sub, "sub-status attribute present on an attempt node");
+        assert!(
+            has_sent,
+            "request_sent attribute present on the failed attempt"
+        );
     }
 }

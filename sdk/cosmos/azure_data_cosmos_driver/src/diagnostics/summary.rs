@@ -48,6 +48,9 @@ pub struct TopError {
     pub status: u16,
     /// Coarse error classification.
     pub error_kind: String,
+    /// Cosmos sub-status code (finer classification), when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_status: Option<u16>,
     /// Service request id of the failing attempt.
     pub service_request_id: String,
 }
@@ -126,6 +129,7 @@ pub(crate) fn summarize(parsed: &Parsed) -> Summary {
                 top_error = Some(TopError {
                     status: attempt.status,
                     error_kind: kind.to_string(),
+                    sub_status: attempt.sub_status,
                     service_request_id: attempt.service_request_id.clone(),
                 });
             }
@@ -204,6 +208,15 @@ pub(crate) fn build_wiretree(parsed: &Parsed) -> WireTree {
         ];
         if let Some(kind) = error_kind(attempt.status) {
             node_attrs.push((attrs::ATTR_ERROR_KIND.to_string(), kind.to_string()));
+        }
+        if let Some(sub) = attempt.sub_status {
+            node_attrs.push((attrs::ATTR_SUB_STATUS.to_string(), sub.to_string()));
+        }
+        if !attempt.request_sent.is_empty() {
+            node_attrs.push((
+                attrs::ATTR_REQUEST_SENT.to_string(),
+                attempt.request_sent.clone(),
+            ));
         }
         nodes.push(WireNode {
             parent: Some(0),
