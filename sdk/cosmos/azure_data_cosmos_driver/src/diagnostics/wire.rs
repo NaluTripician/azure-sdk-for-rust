@@ -175,7 +175,8 @@ pub fn write_str(out: &mut Vec<u8>, value: &str) {
 
 /// Reads a length-prefixed UTF-8 string from `input` at `pos`, advancing `pos`.
 pub fn read_str(input: &[u8], pos: &mut usize) -> Result<String, DecodeError> {
-    let len = read_varint(input, pos)? as usize;
+    let len = usize::try_from(read_varint(input, pos)?)
+        .map_err(|_| DecodeError::Malformed("string length exceeds platform limits"))?;
     let end = pos.checked_add(len).ok_or(DecodeError::UnexpectedEof)?;
     let bytes = input.get(*pos..end).ok_or(DecodeError::UnexpectedEof)?;
     let s = std::str::from_utf8(bytes)
@@ -208,24 +209,33 @@ fn write_payload(tree: &WireTree) -> Vec<u8> {
 }
 
 fn read_payload(payload: &[u8]) -> Result<WireTree, DecodeError> {
+    // Cap pre-allocation so a malformed blob with a huge node/attr count cannot force a giant
+    // up-front allocation (DoS). The Vec still grows as real, EOF-bounded content is decoded.
+    const PREALLOC_CAP: usize = 1024;
     let mut pos = 0usize;
     let operation = read_str(payload, &mut pos)?;
-    let count = read_varint(payload, &mut pos)? as usize;
-    let mut nodes = Vec::with_capacity(count);
+    let count = usize::try_from(read_varint(payload, &mut pos)?)
+        .map_err(|_| DecodeError::Malformed("node count exceeds platform limits"))?;
+    let mut nodes = Vec::with_capacity(count.min(PREALLOC_CAP));
     for _ in 0..count {
         let raw_parent = read_varint(payload, &mut pos)?;
         let parent = if raw_parent == 0 {
             None
         } else {
-            Some((raw_parent - 1) as u32)
+            Some(
+                u32::try_from(raw_parent - 1)
+                    .map_err(|_| DecodeError::Malformed("parent index out of range"))?,
+            )
         };
         let kind = *payload.get(pos).ok_or(DecodeError::UnexpectedEof)?;
         pos += 1;
         let start_ns = read_varint(payload, &mut pos)?;
         let duration_ns = read_varint(payload, &mut pos)?;
-        let status = read_varint(payload, &mut pos)? as u16;
-        let attr_count = read_varint(payload, &mut pos)? as usize;
-        let mut attrs = Vec::with_capacity(attr_count);
+        let status = u16::try_from(read_varint(payload, &mut pos)?)
+            .map_err(|_| DecodeError::Malformed("status code out of range"))?;
+        let attr_count = usize::try_from(read_varint(payload, &mut pos)?)
+            .map_err(|_| DecodeError::Malformed("attribute count exceeds platform limits"))?;
+        let mut attrs = Vec::with_capacity(attr_count.min(PREALLOC_CAP));
         for _ in 0..attr_count {
             let key = read_str(payload, &mut pos)?;
             let value = read_str(payload, &mut pos)?;
@@ -381,6 +391,43 @@ mod tests {
         let mut blob = encode(&sample_tree(), false);
         blob[4] = 99;
         assert_eq!(decode(&blob), Err(DecodeError::UnsupportedVersion(99)));
+    }
+
+    #[test]
+    fn rejects_truncated_payload() {
+        let blob = encode(&sample_tree(), false);
+        // Lop off the back half of the payload: decode must error, not panic.
+        let truncated = &blob[..blob.len() - 5];
+        assert!(matches!(
+            decode(truncated),
+            Err(DecodeError::UnexpectedEof) | Err(DecodeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_string_length_without_allocating() {
+        // magic + version + flags(uncompressed) + operation length = u64::MAX varint.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(MAGIC);
+        blob.push(VERSION);
+        blob.push(0);
+        write_varint(&mut blob, u64::MAX);
+        // No string bytes follow; the decoder must reject rather than try to read u64::MAX bytes.
+        assert!(matches!(
+            decode(&blob),
+            Err(DecodeError::Malformed(_)) | Err(DecodeError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn read_varint_rejects_overlong() {
+        // 10 continuation bytes overflow the 64-bit accumulator.
+        let bytes = [0x80u8; 11];
+        let mut pos = 0;
+        assert_eq!(
+            read_varint(&bytes, &mut pos),
+            Err(DecodeError::Malformed("varint too long"))
+        );
     }
 
     #[test]

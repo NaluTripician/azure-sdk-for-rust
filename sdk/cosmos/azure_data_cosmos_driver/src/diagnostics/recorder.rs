@@ -274,8 +274,12 @@ pub(crate) fn parse(buf: &[u8]) -> Parsed {
                 p.client_request_id = wire::read_str(buf, &mut pos).unwrap_or_default();
             }
             t if t == Tag::Attempt as u8 => {
-                let index = wire::read_varint(buf, &mut pos).unwrap_or(0) as u32;
-                let status = wire::read_varint(buf, &mut pos).unwrap_or(0) as u16;
+                let index = wire::read_varint(buf, &mut pos)
+                    .unwrap_or(0)
+                    .min(u64::from(u32::MAX)) as u32;
+                let status = wire::read_varint(buf, &mut pos)
+                    .unwrap_or(0)
+                    .min(u64::from(u16::MAX)) as u16;
                 let service_request_id = wire::read_str(buf, &mut pos).unwrap_or_default();
                 let mut ru_bytes = [0u8; 4];
                 if let Some(slice) = buf.get(pos..pos + 4) {
@@ -313,7 +317,9 @@ pub(crate) fn parse(buf: &[u8]) -> Parsed {
                     Outcome::Success
                 };
                 pos += 1;
-                p.attempt_count = wire::read_varint(buf, &mut pos).unwrap_or(0) as u32;
+                p.attempt_count = wire::read_varint(buf, &mut pos)
+                    .unwrap_or(0)
+                    .min(u64::from(u32::MAX)) as u32;
                 p.total_ns = wire::read_varint(buf, &mut pos).unwrap_or(0);
             }
             _ => break,

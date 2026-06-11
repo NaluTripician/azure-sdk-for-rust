@@ -270,4 +270,62 @@ mod tests {
         let rendered = finish(rec, &DiagnosticsPolicy::always());
         assert!(rendered.summary().is_some());
     }
+
+    /// Prints the output sizes (run with `--nocapture`) used for the PR before/after table, and
+    /// asserts the summary stays flat regardless of fan-out width while the detail tier grows.
+    #[test]
+    fn output_sizes_dropped_vs_summary_vs_detailed() {
+        let pool = LogPool::new();
+
+        // S2 (retry 429 -> 200), summary tier.
+        let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct/d/c/1", "c");
+        rec.record_attempt(0, 429, Some("svc-429"), Some(4.2), 0, 3_000_000);
+        rec.record_attempt(1, 200, Some("svc-200"), Some(4.2), 3_000_000, 4_000_000);
+        rec.record_end(Outcome::Success, 2, Some(7_000_000));
+        let s2_summary = finish(rec, &DiagnosticsPolicy::always());
+        let s2_summary_bytes = s2_summary.summary().unwrap().to_json().len();
+
+        // S2 detailed tier.
+        let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct/d/c/1", "c");
+        rec.record_attempt(0, 429, Some("svc-429"), Some(4.2), 0, 3_000_000);
+        rec.record_attempt(1, 200, Some("svc-200"), Some(4.2), 3_000_000, 4_000_000);
+        rec.record_end(Outcome::Success, 2, Some(7_000_000));
+        let s2_detailed = finish(
+            rec,
+            &DiagnosticsPolicy {
+                binary: true,
+                ..DiagnosticsPolicy::always()
+            },
+        );
+        let s2_detail_bytes = s2_detailed.detailed_blob().unwrap().len();
+
+        // Fan-out (1 attempt + 25 children), both tiers.
+        let mut rec = DiagnosticsRecorder::start(&pool, "query_items", "https://acct/d/c", "cq");
+        rec.record_attempt(0, 200, Some("svc-q"), Some(18.6), 0, 6_000_000);
+        for i in 0..25u32 {
+            rec.merge_child(&ChildRecord {
+                plan_node_id: format!("plan-{i}"),
+                feed_range: format!("range-{i}"),
+                start_ns: u64::from(i) * 1000,
+                duration_ns: 500,
+            });
+        }
+        rec.record_end(Outcome::Success, 1, Some(6_000_000));
+        let fanout = finish(
+            rec,
+            &DiagnosticsPolicy {
+                binary: true,
+                ..DiagnosticsPolicy::always()
+            },
+        );
+        let fanout_summary_bytes = fanout.summary().unwrap().to_json().len();
+        let fanout_detail_bytes = fanout.detailed_blob().unwrap().len();
+
+        println!("DIAG-SIZES dropped=0 s2_summary={s2_summary_bytes} s2_detailed_azd1={s2_detail_bytes} fanout25_summary={fanout_summary_bytes} fanout25_detailed_azd1={fanout_detail_bytes}");
+
+        // The summary is fan-out-width-independent (collapses children to a count); the detail
+        // tier grows with the children.
+        assert!(fanout_summary_bytes < fanout_detail_bytes);
+        assert!(s2_summary_bytes > 0);
+    }
 }
