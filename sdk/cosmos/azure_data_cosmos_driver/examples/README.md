@@ -27,6 +27,11 @@ cargo run -p azure_data_cosmos_driver --example diagnostics_demo
    terminal state (`AlternateWon`).
 5. **Gate modes side by side** — the same operation under `Off`, `Always`, and `Threshold` (plus a
    `Threshold` fast-success that is dropped), and the `should_build` gate predicate truth table.
+6. **Summary block** — the `.NET CosmosDiagnostics`-style top-level `summary` (computed at
+   finalization): `(status, sub-status)` histogram, retry/throttle counts, regions, final status,
+   total RU.
+7. **Encoding modes** — the same context rendered `Json` (pretty, default) / `Compact` (minified) /
+   `Encoded` (base64 of compact), with sizes; encoding is a `DriverOptions` client option.
 
 ### Live-demo narration (optional)
 

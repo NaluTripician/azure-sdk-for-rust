@@ -26,6 +26,10 @@
 //!    terminal state.
 //! 5. **Gate modes side by side** — the same operation under `Off`, `Always`, and `Threshold`, so
 //!    the cost/visibility trade is obvious (including a `Threshold` fast-success that is dropped).
+//! 6. **Summary block** — the `.NET CosmosDiagnostics`-style top-level `summary` (computed at
+//!    finalization): status histogram, retry/throttle counts, regions, final status, total RU.
+//! 7. **Encoding modes** — the same context rendered `Json` / `Compact` / `Encoded` (a
+//!    `DriverOptions` client option), with sizes.
 //!
 //! The canonical JSON for each context exposes every rich field slot (`events`, transport-shard,
 //! `fault_injection_evaluations`, sub-status, …). The synthetic offline scenarios populate the
@@ -38,7 +42,7 @@ use azure_data_cosmos_driver::diagnostics::capture::{
 };
 use azure_data_cosmos_driver::diagnostics::{DiagnosticsContext, ExecutionContext};
 use azure_data_cosmos_driver::options::DiagnosticsOptions;
-use azure_data_cosmos_driver::DiagnosticsVerbosity;
+use azure_data_cosmos_driver::{DiagnosticsEncoding, DiagnosticsVerbosity};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -422,10 +426,58 @@ fn main() {
         );
     }
 
+    // -- Section 6: .NET-style summary block ---------------------------------------------------
+    header(
+        "6. Top-level summary block (.NET CosmosDiagnostics-style)",
+        "Computed once at finalization (after the requests) - a roll-up over the retry op from section 2.",
+    );
+    let ctx = finish(record_retry(&pool), &DiagnosticsPolicy::always(), options())
+        .expect("Always mode builds a context");
+    let summary = ctx.summary();
+    println!("  request_count    : {}", summary.request_count());
+    println!("  retry_count      : {}", summary.retry_count());
+    println!("  throttled_count  : {}", summary.throttled_count());
+    println!(
+        "  total RU charge  : {:.2}",
+        summary.total_request_charge().value()
+    );
+    println!("  regions          : {:?}", summary.regions_contacted());
+    println!(
+        "  final status     : {}",
+        summary
+            .final_status()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "<none>".to_string())
+    );
+    println!("  top error        : {:?}", summary.top_error());
+    println!("\n  summary JSON (emitted at the top of the context output):");
+    match serde_json::to_value(summary).and_then(|v| serde_json::to_string_pretty(&v)) {
+        Ok(pretty) => println!("{pretty}"),
+        Err(_) => println!("  <unavailable>"),
+    }
+
+    // -- Section 7: encoding modes side by side ------------------------------------------------
+    header(
+        "7. Diagnostics encoding modes (Json / Compact / Encoded)",
+        "Same context rendered three ways via DiagnosticsContext::encode - a DriverOptions client option.",
+    );
+    let json = ctx.encode(DiagnosticsEncoding::Json);
+    let compact = ctx.encode(DiagnosticsEncoding::Compact);
+    let encoded = ctx.encode(DiagnosticsEncoding::Encoded);
+    println!("  Json    (default, pretty)  : {} bytes", json.len());
+    println!("  Compact (minified JSON)    : {} bytes", compact.len());
+    println!(
+        "  Encoded (base64 of compact): {} bytes  (decodes back to the compact JSON)",
+        encoded.len()
+    );
+    println!("\n  Compact:\n{compact}");
+    println!("\n  Encoded:\n{encoded}");
+
     println!("\n{}", "=".repeat(96));
     println!("Done. Default policy is Mode::Always (diagnostics out-of-the-box); Off disables the");
     println!(
         "per-request build on the hot path; Threshold surfaces only on slow/errored operations."
     );
+    println!("The summary block is computed at finalization; encoding is a DriverOptions option.");
     println!("{}", "=".repeat(96));
 }
