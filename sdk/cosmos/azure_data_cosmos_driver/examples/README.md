@@ -2,48 +2,59 @@
 
 # Examples
 
-## `diagnostics_demo` — gated diagnostics, offline walk-through
+## `diagnostics_demo` — gated diagnostics, LIVE or offline
 
-A fully **offline**, presentation-ready demo of the Cosmos driver's gated diagnostics engine
-(`azure_data_cosmos_driver::diagnostics::capture`). It builds each scenario from the public capture
-API — the same front-end the driver uses on the hot path — and pretty-prints the resulting canonical
-`DiagnosticsContext`. **No live Cosmos account is required.**
+A presentation-ready demo of the Cosmos driver's gated diagnostics engine
+(`azure_data_cosmos_driver::diagnostics::capture`). It runs in two modes.
 
-Run it:
+### LIVE mode (real account + fault injection)
+
+Connects to a real Cosmos account and uses the driver's **fault injection** to force the scenarios,
+so the printed `DiagnosticsContext` carries **real** server timings, activity ids, and regions.
+Requires the `reqwest` + `fault_injection` features.
+
+```bash
+cargo run -p azure_data_cosmos_driver --example diagnostics_demo --features "reqwest fault_injection"
+```
+
+It tries these env vars in order and uses the first whose driver initializes (secret values are
+**never** printed — only the endpoint host):
+
+1. `COSMOS_TEST61`
+2. `COSMOS_CONNECTION_STRING`
+3. `COSMOSDB_MULTI_REGION`
+
+LIVE mode creates a temporary database + container, seeds one item, runs the scenarios, and
+**deletes the temporary database on exit**. Each scenario prints the real `DiagnosticsContext` plus
+the Summary block, the encoding sizes (Json/Compact/Encoded), and the `FaultInjectionEvaluation`s
+proving the injected fault fired:
+
+- **A. 429 throttle → retry → success** — `TooManyRequests` injected on `ReadItem` with a hit-limit;
+  the driver retries to a real `200`.
+- **B. 503 server error** — `ServiceUnavailable` injected always; the read fails and the demo reads
+  `err.diagnostics()` (on a multi-region account this also shows real region-failover attempts).
+- **C. Hedging / region race** — hedging enabled + a delay injected on the first read leg, so an
+  alternate region can win; prints the `HedgeDiagnostics` terminal state.
+
+If the live features are enabled but **no account is reachable**, the demo prints a note and falls
+back to the offline demo automatically.
+
+### OFFLINE mode (no account needed)
+
+Builds each scenario synthetically from the public capture API — always runnable for a presentation:
 
 ```bash
 cargo run -p azure_data_cosmos_driver --example diagnostics_demo
 ```
 
-### What it shows (one labeled section each)
-
-1. **Typical single-attempt success** — a `200`: activity id, status, request charge, region,
-   endpoint, and per-attempt server timing.
-2. **Retry after throttling (429 → 200)** — two `RequestDiagnostics` with
-   `ExecutionContext::Initial` (carrying the throttle sub-status `3200`) then `Retry`.
-3. **Error operation** — a terminal failure: final status + sub-status and the service request
-   (activity) id captured on the error path.
-4. **Hedged multi-region** — the per-region legs, which leg won, and the `HedgeDiagnostics`
-   terminal state (`AlternateWon`).
-5. **Gate modes side by side** — the same operation under `Off`, `Always`, and `Threshold` (plus a
-   `Threshold` fast-success that is dropped), and the `should_build` gate predicate truth table.
-6. **Summary block** — the `.NET CosmosDiagnostics`-style top-level `summary` (computed at
-   finalization): `(status, sub-status)` histogram, retry/throttle counts, regions, final status,
-   total RU.
-7. **Encoding modes** — the same context rendered `Json` (pretty, default) / `Compact` (minified) /
-   `Encoded` (base64 of compact), with sizes; encoding is a `DriverOptions` client option.
+Offline sections: (1) typical success, (2) retry 429→200, (3) error op, (4) hedged multi-region,
+(5) gate modes `Off`/`Always`/`Threshold`, (6) the `.NET`-style top-level `summary` block, and
+(7) the `Json`/`Compact`/`Encoded` encoding modes with sizes.
 
 ### Live-demo narration (optional)
 
-> "Every Cosmos operation produces a `DiagnosticsContext`. Section 1 is the happy path — one
-> request, its RU charge, region and timing. Section 2 shows a throttle: the diagnostics keep
-> *both* attempts, tagged `Initial` (429/3200) then `Retry` (200). Section 3 is an error — the
-> final status, sub-status and service request id are all captured. Section 4 is cross-region
-> hedging: two legs race, West US wins, and the `HedgeDiagnostics` records the terminal state.
-> Section 5 is the gate: `Off` produces nothing, `Always` always builds, and `Threshold` only
-> surfaces slow or errored operations — so a fast success is dropped for ~free."
-
-The canonical JSON for each context exposes every rich field slot (`events`, transport-shard,
-`fault_injection_evaluations`, sub-status, …); the synthetic offline scenarios fill the
-operation/attempt-level fields, while `events` and transport-shard detail are populated by the live
-pipeline and appear here as their empty slots.
+> "Every Cosmos operation produces a `DiagnosticsContext`. In LIVE mode we inject faults to force
+> the interesting paths: a 429 that the driver retries to a 200, a 503 that triggers region
+> failover, and a hedge race across regions — each with real server timings and activity ids, and a
+> `FaultInjectionEvaluation` proving the fault fired. Every context carries the `.NET`-style summary
+> roll-up and can be rendered as pretty JSON, compact JSON, or a base64 token."
