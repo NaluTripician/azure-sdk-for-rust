@@ -13,9 +13,9 @@
 //! - **OFFLINE** (fallback) — builds each scenario synthetically from the public capture API, so the
 //!   demo always runs for a presentation even with no account.
 //!
-//! Run it LIVE (tries `COSMOS_TEST61`, then `COSMOS_CONNECTION_STRING`, then `COSMOSDB_MULTI_REGION`;
-//! uses the first that initializes; secret values are never printed; creates and **deletes** a temp
-//! database):
+//! Run it LIVE (uses the `COSMOS_CONNECTION_STRING` account **only** — tries master-key auth from
+//! the connection string, then Entra ID for the same endpoint; secret values are never printed;
+//! creates and **deletes** a temp database):
 //!
 //! ```text
 //! cargo run -p azure_data_cosmos_driver --example diagnostics_demo --features "reqwest fault_injection"
@@ -554,12 +554,9 @@ mod live {
     use std::time::Duration;
     use url::Url;
 
-    /// Env vars to try, in order. The first whose driver initializes is used.
-    const ACCOUNTS: &[&str] = &[
-        "COSMOS_TEST61",
-        "COSMOS_CONNECTION_STRING",
-        "COSMOSDB_MULTI_REGION",
-    ];
+    /// The ONLY account this demo uses. (Per the constraint, `COSMOS_TEST61` and
+    /// `COSMOSDB_MULTI_REGION` are not used.)
+    const ACCOUNT_VAR: &str = "COSMOS_CONNECTION_STRING";
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -581,34 +578,49 @@ mod live {
         rt.block_on(run_live_async())
     }
 
-    /// A connected account: its label + master-key reference (key never printed).
+    /// A connected account: its host + auth method + reference (key/token never printed).
     struct Connected {
-        label: &'static str,
         host: String,
+        auth: &'static str,
         account: AccountReference,
     }
 
-    /// Tries each candidate account; returns the first whose driver initializes (a real init
-    /// round-trip, so 401/503/firewall accounts are filtered out here).
+    /// Connects to the `COSMOS_CONNECTION_STRING` account (only). Tries master-key auth first
+    /// (from the connection string), then Entra ID via the developer-tools credential — the account
+    /// may have local/master-key auth disabled. Returns the first that initializes (a real init
+    /// round-trip). Never prints the key or token.
     async fn connect() -> Option<Connected> {
-        for &label in ACCOUNTS {
-            let Ok(raw) = std::env::var(label) else {
-                println!("  [{label}] absent — skipping");
-                continue;
-            };
-            let Ok(conn) = raw.parse::<ConnectionString>() else {
-                println!("  [{label}] connection string did not parse — skipping");
-                continue;
-            };
-            let Ok(endpoint) = Url::parse(conn.account_endpoint()) else {
-                println!("  [{label}] endpoint is not a valid URL — skipping");
-                continue;
-            };
-            let host = endpoint.host_str().unwrap_or("<unknown>").to_string();
-            let account = AccountReference::with_master_key(endpoint, conn.account_key().clone());
+        let var = ACCOUNT_VAR;
+        let Ok(raw) = std::env::var(var) else {
+            println!("  [{var}] absent");
+            return None;
+        };
+        let Ok(conn) = raw.parse::<ConnectionString>() else {
+            println!("  [{var}] connection string did not parse");
+            return None;
+        };
+        let Ok(endpoint) = Url::parse(conn.account_endpoint()) else {
+            println!("  [{var}] endpoint is not a valid URL");
+            return None;
+        };
+        let host = endpoint.host_str().unwrap_or("<unknown>").to_string();
 
+        // Candidate credentials for the SAME endpoint: master key, then Entra ID.
+        let mut candidates: Vec<(&'static str, AccountReference)> = vec![(
+            "master-key",
+            AccountReference::with_master_key(endpoint.clone(), conn.account_key().clone()),
+        )];
+        match azure_identity::DeveloperToolsCredential::new(None) {
+            Ok(cred) => candidates.push((
+                "entra (developer tools)",
+                AccountReference::with_credential(endpoint.clone(), cred),
+            )),
+            Err(e) => println!("  [{var}] could not build Entra credential: {e}"),
+        }
+
+        for (auth, account) in candidates {
             let Ok(runtime) = CosmosDriverRuntime::builder().build().await else {
-                println!("  [{label}] ({host}) runtime build failed — skipping");
+                println!("  [{var}] ({host}) runtime build failed [{auth}]");
                 continue;
             };
             let opts = DriverOptions::builder(account.clone())
@@ -621,20 +633,18 @@ mod live {
             .await
             {
                 Ok(Ok(_driver)) => {
-                    println!("  [{label}] ({host}) connected ✓");
+                    println!("  [{var}] ({host}) connected via {auth} ✓");
                     return Some(Connected {
-                        label,
                         host,
+                        auth,
                         account,
                     });
                 }
-                Ok(Err(e)) => {
-                    println!(
-                        "  [{label}] ({host}) driver init failed: {} — skipping",
-                        e.status()
-                    )
-                }
-                Err(_) => println!("  [{label}] ({host}) timed out — skipping"),
+                Ok(Err(e)) => println!(
+                    "  [{var}] ({host}) {auth} init failed: {} — trying next",
+                    e.status()
+                ),
+                Err(_) => println!("  [{var}] ({host}) {auth} timed out — trying next"),
             }
         }
         None
@@ -642,13 +652,16 @@ mod live {
 
     async fn run_live_async() -> LiveOutcome {
         println!("\nCosmos driver diagnostics - LIVE demo (real account + fault injection)");
-        println!("Probing accounts (secret values are never printed):");
+        println!("Account: COSMOS_CONNECTION_STRING only (secret values are never printed):");
         let Some(conn) = connect().await else {
-            return LiveOutcome::FellBack("no reachable account");
+            return LiveOutcome::FellBack("COSMOS_CONNECTION_STRING account unreachable");
         };
 
         println!("\n{}", "=".repeat(96));
-        println!("| Using account: {} (host {})", conn.label, conn.host);
+        println!(
+            "| Using account: COSMOS_CONNECTION_STRING (host {}, auth {})",
+            conn.host, conn.auth
+        );
         println!(
             "| Mode: LIVE — diagnostics below carry real server timings, activity ids, regions."
         );

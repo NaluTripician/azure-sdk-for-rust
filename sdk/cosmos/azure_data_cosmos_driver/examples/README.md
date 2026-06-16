@@ -17,12 +17,10 @@ Requires the `reqwest` + `fault_injection` features.
 cargo run -p azure_data_cosmos_driver --example diagnostics_demo --features "reqwest fault_injection"
 ```
 
-It tries these env vars in order and uses the first whose driver initializes (secret values are
-**never** printed — only the endpoint host):
-
-1. `COSMOS_TEST61`
-2. `COSMOS_CONNECTION_STRING`
-3. `COSMOSDB_MULTI_REGION`
+It uses the `COSMOS_CONNECTION_STRING` account **only** (secret values are **never** printed — only
+the endpoint host). It tries master-key auth from the connection string first, then Entra ID
+(developer-tools credential) for the same endpoint, since the account may have local/master-key auth
+disabled.
 
 LIVE mode creates a temporary database + container, seeds one item, runs the scenarios, and
 **deletes the temporary database on exit**. Each scenario prints the real `DiagnosticsContext` plus
@@ -32,12 +30,14 @@ proving the injected fault fired:
 - **A. 429 throttle → retry → success** — `TooManyRequests` injected on `ReadItem` with a hit-limit;
   the driver retries to a real `200`.
 - **B. 503 server error** — `ServiceUnavailable` injected always; the read fails and the demo reads
-  `err.diagnostics()` (on a multi-region account this also shows real region-failover attempts).
+  `err.diagnostics()` (if the account is multi-region this also shows real region-failover attempts).
 - **C. Hedging / region race** — hedging enabled + a delay injected on the first read leg, so an
-  alternate region can win; prints the `HedgeDiagnostics` terminal state.
+  alternate region can win; prints the `HedgeDiagnostics` terminal state. If the account is
+  single-region, the hedge can't race naturally — the demo still drives it via fault injection and
+  reports whatever regions the account exposes.
 
-If the live features are enabled but **no account is reachable**, the demo prints a note and falls
-back to the offline demo automatically.
+If the `COSMOS_CONNECTION_STRING` account is **unreachable** (e.g. master-key disabled and no Entra
+data-plane access), the demo prints a note and falls back to the offline demo automatically.
 
 ### OFFLINE mode (no account needed)
 
