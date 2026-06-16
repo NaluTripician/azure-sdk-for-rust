@@ -48,6 +48,10 @@ Offline sections: (1) typical success, (2) retry 429→200, (3) error op, (4) he
 (5) gate modes `Off`/`Always`/`Threshold`, (6) the `.NET`-style top-level `summary` block, and
 (7) the `Json`/`Compact`/`Encoded` encoding modes with sizes.
 
+Every section header is stamped with the exact wall-clock time (RFC 3339, UTC) at which the phase
+ran, and the diagnostics JSON in each section carries the matching `start_time`/`end_time` fields
+(real server wall-clock in LIVE mode) on the operation, the `summary`, and each attempt.
+
 ### Live-demo narration (optional)
 
 > "Every Cosmos operation produces a `DiagnosticsContext`. In LIVE mode we inject faults to force

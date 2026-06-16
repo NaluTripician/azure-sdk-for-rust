@@ -64,8 +64,14 @@ fn options() -> Arc<DiagnosticsOptions> {
 }
 
 /// Prints a section header + a one-line caption explaining what it demonstrates.
+///
+/// The header also stamps the exact wall-clock time (RFC 3339, UTC) at which the phase ran, so a
+/// live walk-through can be correlated with the real `start_time`/`end_time` inside each section's
+/// diagnostics JSON.
 fn header(title: &str, caption: &str) {
+    let now = azure_core::time::to_rfc3339(&azure_core::time::OffsetDateTime::now_utc());
     println!("\n{}", "=".repeat(96));
+    println!("| [{now}]");
     println!("| {title}");
     println!("| {caption}");
     println!("{}", "=".repeat(96));
