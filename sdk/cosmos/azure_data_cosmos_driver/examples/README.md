@@ -17,10 +17,9 @@ Requires the `reqwest` + `fault_injection` features.
 cargo run -p azure_data_cosmos_driver --example diagnostics_demo --features "reqwest fault_injection"
 ```
 
-It uses the `COSMOS_CONNECTION_STRING` account **only** (secret values are **never** printed — only
-the endpoint host). It tries master-key auth from the connection string first, then Entra ID
-(developer-tools credential) for the same endpoint, since the account may have local/master-key auth
-disabled.
+It uses the `COSMOSDB_MULTI_REGION` account **only** (read from the env var at runtime; secret
+values are **never** printed — only the endpoint host), authenticating with the master key from the
+connection string.
 
 LIVE mode creates a temporary database + container, seeds one item, runs the scenarios, and
 **deletes the temporary database on exit**. Each scenario prints the real `DiagnosticsContext` plus
@@ -30,14 +29,12 @@ proving the injected fault fired:
 - **A. 429 throttle → retry → success** — `TooManyRequests` injected on `ReadItem` with a hit-limit;
   the driver retries to a real `200`.
 - **B. 503 server error** — `ServiceUnavailable` injected always; the read fails and the demo reads
-  `err.diagnostics()` (if the account is multi-region this also shows real region-failover attempts).
+  `err.diagnostics()` (on this multi-region account this also shows real region-failover attempts).
 - **C. Hedging / region race** — hedging enabled + a delay injected on the first read leg, so an
-  alternate region can win; prints the `HedgeDiagnostics` terminal state. If the account is
-  single-region, the hedge can't race naturally — the demo still drives it via fault injection and
-  reports whatever regions the account exposes.
+  alternate region can win; prints the `HedgeDiagnostics` terminal state.
 
-If the `COSMOS_CONNECTION_STRING` account is **unreachable** (e.g. master-key disabled and no Entra
-data-plane access), the demo prints a note and falls back to the offline demo automatically.
+If the `COSMOSDB_MULTI_REGION` account is **unreachable**, the demo prints a note and falls back to
+the offline demo automatically.
 
 ### OFFLINE mode (no account needed)
 

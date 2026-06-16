@@ -13,9 +13,8 @@
 //! - **OFFLINE** (fallback) — builds each scenario synthetically from the public capture API, so the
 //!   demo always runs for a presentation even with no account.
 //!
-//! Run it LIVE (uses the `COSMOS_CONNECTION_STRING` account **only** — tries master-key auth from
-//! the connection string, then Entra ID for the same endpoint; secret values are never printed;
-//! creates and **deletes** a temp database):
+//! Run it LIVE (uses the `COSMOSDB_MULTI_REGION` account **only**, via master-key auth from the
+//! connection string; secret values are never printed; creates and **deletes** a temp database):
 //!
 //! ```text
 //! cargo run -p azure_data_cosmos_driver --example diagnostics_demo --features "reqwest fault_injection"
@@ -554,9 +553,9 @@ mod live {
     use std::time::Duration;
     use url::Url;
 
-    /// The ONLY account this demo uses. (Per the constraint, `COSMOS_TEST61` and
-    /// `COSMOSDB_MULTI_REGION` are not used.)
-    const ACCOUNT_VAR: &str = "COSMOS_CONNECTION_STRING";
+    /// The ONLY account this demo uses for the live run, read from the env at runtime. (Per the
+    /// user's decision; the other Cosmos env vars are not touched.)
+    const ACCOUNT_VAR: &str = "COSMOSDB_MULTI_REGION";
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -578,17 +577,16 @@ mod live {
         rt.block_on(run_live_async())
     }
 
-    /// A connected account: its host + auth method + reference (key/token never printed).
+    /// A connected account: its host + auth method + reference (key never printed).
     struct Connected {
         host: String,
         auth: &'static str,
         account: AccountReference,
     }
 
-    /// Connects to the `COSMOS_CONNECTION_STRING` account (only). Tries master-key auth first
-    /// (from the connection string), then Entra ID via the developer-tools credential — the account
-    /// may have local/master-key auth disabled. Returns the first that initializes (a real init
-    /// round-trip). Never prints the key or token.
+    /// Connects to the `COSMOSDB_MULTI_REGION` account (only) using master-key auth from the
+    /// connection string. Returns `None` (→ offline fallback) if the var is absent, unparseable, or
+    /// the driver can't initialize. Never prints the key.
     async fn connect() -> Option<Connected> {
         let var = ACCOUNT_VAR;
         let Ok(raw) = std::env::var(var) else {
@@ -604,62 +602,50 @@ mod live {
             return None;
         };
         let host = endpoint.host_str().unwrap_or("<unknown>").to_string();
+        let account = AccountReference::with_master_key(endpoint, conn.account_key().clone());
 
-        // Candidate credentials for the SAME endpoint: master key, then Entra ID.
-        let mut candidates: Vec<(&'static str, AccountReference)> = vec![(
-            "master-key",
-            AccountReference::with_master_key(endpoint.clone(), conn.account_key().clone()),
-        )];
-        match azure_identity::DeveloperToolsCredential::new(None) {
-            Ok(cred) => candidates.push((
-                "entra (developer tools)",
-                AccountReference::with_credential(endpoint.clone(), cred),
-            )),
-            Err(e) => println!("  [{var}] could not build Entra credential: {e}"),
-        }
-
-        for (auth, account) in candidates {
-            let Ok(runtime) = CosmosDriverRuntime::builder().build().await else {
-                println!("  [{var}] ({host}) runtime build failed [{auth}]");
-                continue;
-            };
-            let opts = DriverOptions::builder(account.clone())
-                .with_capture_diagnostics_policy(DiagnosticsPolicy::always())
-                .build();
-            match tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                runtime.get_or_create_driver(account.clone(), Some(opts)),
-            )
-            .await
-            {
-                Ok(Ok(_driver)) => {
-                    println!("  [{var}] ({host}) connected via {auth} ✓");
-                    return Some(Connected {
-                        host,
-                        auth,
-                        account,
-                    });
-                }
-                Ok(Err(e)) => println!(
-                    "  [{var}] ({host}) {auth} init failed: {} — trying next",
-                    e.status()
-                ),
-                Err(_) => println!("  [{var}] ({host}) {auth} timed out — trying next"),
+        let Ok(runtime) = CosmosDriverRuntime::builder().build().await else {
+            println!("  [{var}] ({host}) runtime build failed");
+            return None;
+        };
+        let opts = DriverOptions::builder(account.clone())
+            .with_capture_diagnostics_policy(DiagnosticsPolicy::always())
+            .build();
+        match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            runtime.get_or_create_driver(account.clone(), Some(opts)),
+        )
+        .await
+        {
+            Ok(Ok(_driver)) => {
+                println!("  [{var}] ({host}) connected via master-key ✓");
+                Some(Connected {
+                    host,
+                    auth: "master-key",
+                    account,
+                })
+            }
+            Ok(Err(e)) => {
+                println!("  [{var}] ({host}) driver init failed: {}", e.status());
+                None
+            }
+            Err(_) => {
+                println!("  [{var}] ({host}) timed out (unreachable)");
+                None
             }
         }
-        None
     }
 
     async fn run_live_async() -> LiveOutcome {
         println!("\nCosmos driver diagnostics - LIVE demo (real account + fault injection)");
-        println!("Account: COSMOS_CONNECTION_STRING only (secret values are never printed):");
+        println!("Account: COSMOSDB_MULTI_REGION only (secret values are never printed):");
         let Some(conn) = connect().await else {
-            return LiveOutcome::FellBack("COSMOS_CONNECTION_STRING account unreachable");
+            return LiveOutcome::FellBack("COSMOSDB_MULTI_REGION account unreachable");
         };
 
         println!("\n{}", "=".repeat(96));
         println!(
-            "| Using account: COSMOS_CONNECTION_STRING (host {}, auth {})",
+            "| Using account: COSMOSDB_MULTI_REGION (host {}, auth {})",
             conn.host, conn.auth
         );
         println!(
