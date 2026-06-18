@@ -4,20 +4,21 @@
 //! Deferred, threshold-gated diagnostics **capture** — the Cosmos driver's diagnostics engine.
 //!
 //! This module **owns** the canonical diagnostics model
-//! ([`DiagnosticsContext`](crate::diagnostics::DiagnosticsContext) and its builder, in
-//! [`model`](self::model)) and provides a cheap, append-only, lock-free hot-path recorder plus an
+//! ([`DiagnosticsContext`](crate::diagnostics::DiagnosticsContext) and its builder, in the `model`
+//! submodule) and provides a cheap, append-only, lock-free hot-path recorder plus an
 //! operation-end gate. The driver collects diagnostics by feeding the capture-owned builder, and
 //! the gate decides whether the resulting context is surfaced. There is one diagnostics model, not
 //! a parallel one; the model is re-exported from `crate::diagnostics` so the public boundary is
 //! unchanged.
 //!
 //! 1. **Hot path — append-only, pooled, lock-free.** Each operation rents one buffer from a
-//!    [`LogPool`] and a [`DiagnosticsRecorder`] appends a compact record per attempt / hedge leg.
-//!    Appends go through `&mut`, so there is no per-attempt lock and almost nothing is allocated
-//!    after pool warm-up.
+//!    [`LogPool`](crate::diagnostics::capture::LogPool) and a
+//!    [`DiagnosticsRecorder`](crate::diagnostics::capture::DiagnosticsRecorder) appends a compact
+//!    record per attempt / hedge leg. Appends go through `&mut`, so there is no per-attempt lock
+//!    and almost nothing is allocated after pool warm-up.
 //! 2. **Gate — decide at the end.** When the outcome and elapsed time are known, a
-//!    [`DiagnosticsPolicy`] decides whether to surface diagnostics. If not, the buffer goes back to
-//!    the pool — effectively free.
+//!    [`DiagnosticsPolicy`](crate::diagnostics::capture::DiagnosticsPolicy) decides whether to
+//!    surface diagnostics. If not, the buffer goes back to the pool — effectively free.
 //! 3. **Build — only when wanted.** Past the gate, the log is parsed once and replayed onto the
 //!    capture-owned `DiagnosticsContextBuilder` to produce a [`DiagnosticsContext`], mapping each
 //!    attempt to a [`RequestDiagnostics`](crate::diagnostics::RequestDiagnostics) (with the right
@@ -26,8 +27,9 @@
 //!    live driver path the pipeline feeds the same builder with the full rich data and true
 //!    wall-clock timing.
 //!
-//! The gate defaults to [`Mode::Always`] — diagnostics are produced out-of-the-box; set
-//! [`Mode::Threshold`] or [`Mode::Off`] via
+//! The gate defaults to [`Mode::Always`](crate::diagnostics::capture::Mode::Always) — diagnostics
+//! are produced out-of-the-box; set [`Mode::Threshold`](crate::diagnostics::capture::Mode::Threshold)
+//! or [`Mode::Off`](crate::diagnostics::capture::Mode::Off) via
 //! [`DriverOptionsBuilder::with_capture_diagnostics_policy`](crate::options::DriverOptionsBuilder)
 //! (via [`DriverOptions::builder`](crate::options::DriverOptions::builder)) to make the
 //! hot path cheaper.
@@ -43,7 +45,7 @@
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
-//! let pool = LogPool::new();
+//! let pool = Arc::new(LogPool::default());
 //! let policy = DiagnosticsPolicy::threshold(Duration::from_millis(5));
 //!
 //! let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct/", "activity-1");
@@ -79,7 +81,9 @@ mod model;
 mod pool;
 mod recorder;
 
-pub use event::{Attr, AttrKey, AttrValue, EventLog, Span, SpanKind, NO_PARENT};
+pub use event::{
+    Attr, AttrKey, AttrValue, EventLog, EventLogStorage, Span, SpanId, SpanKind, TimeOffset,
+};
 pub use gate::{finish, should_build, DiagnosticsPolicy, Mode};
 pub use pool::LogPool;
 pub use recorder::{AttemptRecord, DiagnosticsRecorder, HedgeOutcome};
@@ -119,7 +123,7 @@ mod tests {
     }
 
     /// Records an S2-shaped op (retry 429 -> 200) and finishes against `policy`.
-    fn render_s2(pool: &LogPool, policy: &DiagnosticsPolicy) -> Option<DiagnosticsContext> {
+    fn render_s2(pool: &Arc<LogPool>, policy: &DiagnosticsPolicy) -> Option<DiagnosticsContext> {
         let mut rec = DiagnosticsRecorder::start(pool, "read_item", "https://acct/", "act-2");
         rec.record_attempt(
             AttemptRecord::new(ExecutionContext::Initial, "East US", "https://east/", 429)
@@ -140,7 +144,7 @@ mod tests {
 
     #[test]
     fn fast_success_is_dropped_and_buffer_pooled() {
-        let pool = LogPool::new();
+        let pool = Arc::new(LogPool::default());
         let policy = DiagnosticsPolicy::threshold(Duration::from_millis(5));
         let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct/", "a-1");
         rec.record_attempt(
@@ -157,7 +161,7 @@ mod tests {
 
     #[test]
     fn slow_op_builds_canonical_diagnostics_context() {
-        let pool = LogPool::new();
+        let pool = Arc::new(LogPool::default());
         let ctx = render_s2(
             &pool,
             &DiagnosticsPolicy::threshold(Duration::from_millis(5)),
@@ -175,7 +179,7 @@ mod tests {
 
     #[test]
     fn hedged_operation_records_legs_and_terminal_state() {
-        let pool = LogPool::new();
+        let pool = Arc::new(LogPool::default());
         let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct/", "act-hedge");
         // Primary leg (East US) is slow / no response; the alternate (West US) wins.
         rec.record_attempt(
@@ -221,7 +225,7 @@ mod tests {
 
     #[test]
     fn dropped_recorder_before_finish_returns_buffer() {
-        let pool = LogPool::new();
+        let pool = Arc::new(LogPool::default());
         {
             let mut rec = DiagnosticsRecorder::start(&pool, "read_item", "https://acct/", "a-3");
             rec.record_attempt(AttemptRecord::new(
@@ -237,7 +241,7 @@ mod tests {
 
     #[test]
     fn context_json_carries_no_auth_material() {
-        let pool = LogPool::new();
+        let pool = Arc::new(LogPool::default());
         let ctx = render_s2(&pool, &DiagnosticsPolicy::always()).expect("built");
         let json = ctx.to_json_string(None).to_lowercase();
         assert!(!json.contains("authorization"));
