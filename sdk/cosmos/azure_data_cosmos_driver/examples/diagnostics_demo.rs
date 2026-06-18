@@ -134,7 +134,7 @@ fn summarize_attempts(ctx: &DiagnosticsContext) {
 }
 
 /// Records a typical single-attempt success into a fresh recorder.
-fn record_typical(pool: &LogPool) -> DiagnosticsRecorder {
+fn record_typical(pool: &Arc<LogPool>) -> DiagnosticsRecorder {
     let mut rec = DiagnosticsRecorder::start(
         pool,
         "read_item",
@@ -157,7 +157,7 @@ fn record_typical(pool: &LogPool) -> DiagnosticsRecorder {
 }
 
 /// Records a throttled-then-retried success (429 -> 200) into a fresh recorder.
-fn record_retry(pool: &LogPool) -> DiagnosticsRecorder {
+fn record_retry(pool: &Arc<LogPool>) -> DiagnosticsRecorder {
     let mut rec = DiagnosticsRecorder::start(
         pool,
         "create_item",
@@ -192,7 +192,7 @@ fn record_retry(pool: &LogPool) -> DiagnosticsRecorder {
 }
 
 /// Records a terminal error operation (503 / sub-status) into a fresh recorder.
-fn record_error(pool: &LogPool) -> DiagnosticsRecorder {
+fn record_error(pool: &Arc<LogPool>) -> DiagnosticsRecorder {
     let mut rec = DiagnosticsRecorder::start(
         pool,
         "read_item",
@@ -216,7 +216,7 @@ fn record_error(pool: &LogPool) -> DiagnosticsRecorder {
 }
 
 /// Records a hedged multi-region operation (alternate region wins) into a fresh recorder.
-fn record_hedged(pool: &LogPool) -> DiagnosticsRecorder {
+fn record_hedged(pool: &Arc<LogPool>) -> DiagnosticsRecorder {
     let mut rec = DiagnosticsRecorder::start(
         pool,
         "read_item",
@@ -258,7 +258,7 @@ fn record_hedged(pool: &LogPool) -> DiagnosticsRecorder {
 }
 
 /// A slow single-attempt success (8 ms) used for the gate-mode comparison.
-fn record_slow_success(pool: &LogPool) -> DiagnosticsRecorder {
+fn record_slow_success(pool: &Arc<LogPool>) -> DiagnosticsRecorder {
     let mut rec = DiagnosticsRecorder::start(
         pool,
         "read_item",
@@ -281,7 +281,7 @@ fn record_slow_success(pool: &LogPool) -> DiagnosticsRecorder {
 }
 
 /// A fast single-attempt success (1 ms) used to show a `Threshold` drop.
-fn record_fast_success(pool: &LogPool) -> DiagnosticsRecorder {
+fn record_fast_success(pool: &Arc<LogPool>) -> DiagnosticsRecorder {
     let mut rec = DiagnosticsRecorder::start(
         pool,
         "read_item",
@@ -349,7 +349,7 @@ fn main() {
 
 /// The offline, fully synthetic demo (no network). Always runnable; used as the live fallback.
 fn run_offline() {
-    let pool = LogPool::new();
+    let pool = Arc::new(LogPool::default());
 
     println!("\nCosmos driver diagnostics - OFFLINE demo (synthetic scenarios)");
     println!("Engine: azure_data_cosmos_driver::diagnostics::capture (gated, lock-free hot path)");
