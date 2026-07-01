@@ -28,6 +28,8 @@ bytes.workspace = true
 crossbeam-epoch = { workspace = true, features = ["std"] }
 futures.workspace = true
 h2 = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true, features = ["testing"] }
 percent-encoding = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
@@ -87,6 +89,15 @@ fault_injection = ["dep:rand"]
 # -> reconstruct path (see DIAGNOSTICS-CAPTURE.md). It is not covered by SemVer
 # and may change or disappear at any time.
 capture_engine = []
+# `otel_spans_spike` gates a THROWAWAY feasibility spike
+# (`tests/otel_retroactive_spans_spike.rs`) that reconstructs a completed
+# `DiagnosticsContext` into a BACKDATED OpenTelemetry span tree using the raw
+# `opentelemetry` `SpanBuilder` (`with_start_time`/`with_end_time`). It exists
+# only to prove the OTel mapping in DIAGNOSTICS-CONTRACT.md is feasible; it is
+# NOT production tracing wiring and is OFF by default. It pulls `opentelemetry`
+# + `opentelemetry_sdk` (in-memory exporter) and builds the sample context via
+# the `capture_engine` recorder path.
+otel_spans_spike = ["capture_engine", "dep:opentelemetry", "dep:opentelemetry_sdk"]
 # `__internal_in_memory_emulator` exposes the in-memory query evaluator
 # (`crate::query::eval`, `crate::query::value`) used by the in-memory Cosmos DB
 # emulator. The evaluator intentionally trades full Cosmos parity for emulator
@@ -153,6 +164,13 @@ required-features = ["__internal_in_memory_emulator"]
 name = "diagnostics_examples"
 path = "tests/diagnostics_examples.rs"
 required-features = ["capture_engine"]
+
+# THROWAWAY OpenTelemetry retroactive-span feasibility spike. Gated behind the
+# off-by-default `otel_spans_spike` feature (which also pulls `capture_engine`).
+[[test]]
+name = "otel_retroactive_spans_spike"
+path = "tests/otel_retroactive_spans_spike.rs"
+required-features = ["otel_spans_spike"]
 
 [[bench]]
 name = "diagnostics_capture"

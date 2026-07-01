@@ -1,5 +1,15 @@
 # Deferred, Threshold-Gated Diagnostics Capture — a prototype event-log engine
 
+> **📎 This is an appendix — a DEFERRED OPTIMIZATION.** The primary diagnostics document is
+> [`DIAGNOSTICS-CONTRACT.md`](./DIAGNOSTICS-CONTRACT.md), which defines the driver↔SDK
+> diagnostics **contract** (a cheap handle + on-demand materialization into metrics / OTel
+> spans / JSON) and the OpenTelemetry mapping. This document describes the append-only
+> **capture engine** that could later make the contract's hot path cheaper. It is **OFF by
+> default** (`capture_engine` feature) and is **not** on the roadmap's critical path — the
+> contract and the SDK requirements come first ("SDK requirements inform the driver design,
+> not the other way around"; "don't optimize too early"). Read the contract doc first; this
+> is background on a possible future optimization.
+
 > **Status: prototype, OFF by default.** This document describes the diagnostics **capture**
 > module (`azure_data_cosmos_driver::diagnostics::capture`). The event-log engine it describes
 > (the `event`, `context`, `encode`, `pool`, `recorder` submodules and `gate::finish`) lives

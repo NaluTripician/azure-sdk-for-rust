@@ -547,6 +547,8 @@ dependencies = [
  "crossbeam-epoch",
  "futures",
  "h2",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "percent-encoding",
  "quick-xml",
  "rand 0.10.1",
