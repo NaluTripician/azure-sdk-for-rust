@@ -1,0 +1,51 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+# Azure Monitor Managed Prometheus settings for the soak cluster.
+#
+# The managed Prometheus addon ignores `prometheus.io/*` pod annotations unless
+# the namespace is explicitly opted in here — without this ConfigMap the
+# collector's /metrics endpoint is never scraped and every dashboard panel reads
+# "No data", with nothing in the logs to explain why.
+#
+# Applied to `kube-system` (not the soak namespace) because that is where the
+# ama-metrics agent reads its configuration from. `deploy-soak.sh` applies it and
+# restarts the agent so the change takes effect immediately rather than at the
+# next agent restart.
+#
+# Renders ${NAMESPACE} via envsubst.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ama-metrics-settings-configmap
+  namespace: kube-system
+data:
+  schema-version: v1
+  config-version: cosmos-observability-soak
+  # Only the soak namespace is opted in; leaving this as `.*` would scrape every
+  # annotated pod in the cluster into the same Azure Monitor workspace.
+  pod-annotation-based-scraping: |-
+    podannotationnamespaceregex = "${NAMESPACE}"
+  default-scrape-settings-enabled: |-
+    kubelet = true
+    coredns = false
+    cadvisor = true
+    kubeproxy = false
+    apiserver = false
+    kubestate = true
+    nodeexporter = true
+    prometheuscollectorhealth = true
+    windowsexporter = false
+    windowskubeproxy = false
+  # 15s matches the harness's default metric export interval, so the scrape does
+  # not alias against the export cadence and produce sawtooth-looking rates.
+  prometheus-collector-settings: |-
+    cluster_alias = "${AKS_CLUSTER}"
+  default-targets-scrape-interval-settings: |-
+    kubelet = "30s"
+    cadvisor = "30s"
+    kubestate = "30s"
+    nodeexporter = "30s"
+    prometheuscollectorhealth = "30s"
+    podannotations = "15s"

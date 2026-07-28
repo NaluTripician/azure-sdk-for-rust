@@ -1,0 +1,273 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+# Long-running Cosmos DB Rust SDK observability soak, deployed to AKS.
+#
+# `${VAR}` placeholders are rendered by `deploy-soak.sh` with envsubst, matching
+# the convention used by `rust-perf/deploy/perf-deployments.yaml` in the
+# cosmos-sdk-copilot-toolkit repo.
+#
+# Two workloads run side by side:
+#
+#   cosmos-obs-soak-steady  — never stops (`--duration-secs 0`), never injects
+#                             faults. This is the regression baseline; any
+#                             movement in its p99 / RU charge is a real signal.
+#   cosmos-obs-soak-canary  — bounded cycles with a fault window near the end of
+#                             each cycle. The Deployment restarts the pod when
+#                             the run completes, which turns a one-shot
+#                             `--fault-start-secs` window into a recurring one.
+#                             This keeps the "rich on error" diagnostics path
+#                             continuously exercised, so a regression that only
+#                             shows up on the error path can't hide behind a
+#                             permanently-green steady-state panel.
+#
+# The canary writes to its own container so its deliberately-degraded numbers
+# never contaminate the baseline: every dashboard series carries a
+# `db_collection_name` label, so the two are separable in every panel.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: cosmos-observability-soak
+---
+# Federated with a user-assigned managed identity that holds the Cosmos DB
+# Built-in Data Contributor role on the target account. No keys anywhere.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cosmos-obs-soak
+  namespace: ${NAMESPACE}
+  annotations:
+    azure.workload.identity/client-id: ${WORKLOAD_IDENTITY_CLIENT_ID}
+  labels:
+    app.kubernetes.io/part-of: cosmos-observability-soak
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: ${NAMESPACE}
+  labels:
+    app: otel-collector
+    app.kubernetes.io/part-of: cosmos-observability-soak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+        app.kubernetes.io/part-of: cosmos-observability-soak
+      annotations:
+        # Azure Monitor Managed Prometheus scrapes pods carrying these
+        # annotations once pod-annotation scraping is enabled for this namespace
+        # (see ama-metrics-settings-configmap.yaml).
+        prometheus.io/scrape: "true"
+        prometheus.io/scheme: "http"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8889"
+        # Roll the collector when its config changes; without this a ConfigMap
+        # edit is silently ignored until something else restarts the pod.
+        checksum/config: "${COLLECTOR_CONFIG_CHECKSUM}"
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION}
+          args: ["--config=/conf/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: prometheus
+              containerPort: 8889
+            - name: health
+              containerPort: 13133
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # memory_limiter in the collector config is expressed as a
+              # percentage of this limit, so the two must be changed together.
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: ${NAMESPACE}
+  labels:
+    app: otel-collector
+    app.kubernetes.io/part-of: cosmos-observability-soak
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: prometheus
+      port: 8889
+      targetPort: 8889
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosmos-obs-soak-steady
+  namespace: ${NAMESPACE}
+  labels:
+    app: cosmos-obs-soak
+    soak-role: steady
+    app.kubernetes.io/part-of: cosmos-observability-soak
+spec:
+  # One writer per container keeps the RU budget predictable, which is what
+  # makes a latency regression attributable to the SDK rather than to 429s.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cosmos-obs-soak
+      soak-role: steady
+  template:
+    metadata:
+      labels:
+        app: cosmos-obs-soak
+        soak-role: steady
+        app.kubernetes.io/part-of: cosmos-observability-soak
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: cosmos-obs-soak
+      containers:
+        - name: harness
+          image: ${ACR_LOGIN_SERVER}/${IMAGE_REPOSITORY}:${IMAGE_TAG}
+          args:
+            - --auth=workload-identity
+            - --region=${COSMOS_REGION}
+            - --database=${COSMOS_DATABASE}
+            - --container=${COSMOS_CONTAINER}
+            - --throughput=${COSMOS_THROUGHPUT}
+            - --seed-count=${SEED_COUNT}
+            - --concurrency=${CONCURRENCY}
+            - --rps=${TARGET_RPS}
+            # 0 = run until terminated. A soak that stops on its own leaves a
+            # gap in exactly the history this dashboard exists to provide.
+            - --duration-secs=0
+            - --read-weight=${READ_WEIGHT}
+            - --write-weight=${WRITE_WEIGHT}
+            - --query-weight=${QUERY_WEIGHT}
+            - --exporter=otlp
+            - --otlp-endpoint=http://otel-collector.${NAMESPACE}.svc.cluster.local:4317
+            - --metric-export-interval-secs=${METRIC_EXPORT_INTERVAL_SECS}
+            # Required by the RU-charge and returned-rows dashboard panels.
+            - --extended-metrics
+          env:
+            - name: AZURE_COSMOS_ENDPOINT
+              value: ${COSMOS_ENDPOINT}
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosmos-obs-soak-canary
+  namespace: ${NAMESPACE}
+  labels:
+    app: cosmos-obs-soak
+    soak-role: fault-canary
+    app.kubernetes.io/part-of: cosmos-observability-soak
+spec:
+  replicas: ${FAULT_CANARY_REPLICAS}
+  selector:
+    matchLabels:
+      app: cosmos-obs-soak
+      soak-role: fault-canary
+  template:
+    metadata:
+      labels:
+        app: cosmos-obs-soak
+        soak-role: fault-canary
+        app.kubernetes.io/part-of: cosmos-observability-soak
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: cosmos-obs-soak
+      containers:
+        - name: harness
+          image: ${ACR_LOGIN_SERVER}/${IMAGE_REPOSITORY}:${IMAGE_TAG}
+          args:
+            - --auth=workload-identity
+            - --region=${COSMOS_REGION}
+            - --database=${COSMOS_DATABASE}
+            # Separate container so injected failures never move the baseline
+            # numbers; filter on db_collection_name to tell them apart.
+            - --container=${COSMOS_CONTAINER}_canary
+            - --throughput=${COSMOS_THROUGHPUT}
+            - --seed-count=${SEED_COUNT}
+            - --concurrency=${FAULT_CANARY_CONCURRENCY}
+            - --rps=${FAULT_CANARY_RPS}
+            # Bounded run + `restartPolicy: Always` = the fault window repeats
+            # every cycle for as long as the Deployment exists.
+            - --duration-secs=${FAULT_CYCLE_SECS}
+            - --exporter=otlp
+            - --otlp-endpoint=http://otel-collector.${NAMESPACE}.svc.cluster.local:4317
+            - --metric-export-interval-secs=${METRIC_EXPORT_INTERVAL_SECS}
+            - --extended-metrics
+            - --fault-probability=${FAULT_PROBABILITY}
+            - --fault-error=${FAULT_ERROR}
+            - --fault-start-secs=${FAULT_START_SECS}
+            - --fault-duration-secs=${FAULT_DURATION_SECS}
+          env:
+            - name: AZURE_COSMOS_ENDPOINT
+              value: ${COSMOS_ENDPOINT}
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]

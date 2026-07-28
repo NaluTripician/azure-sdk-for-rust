@@ -154,7 +154,7 @@ authoritative list.
 | `--endpoint` | `AZURE_COSMOS_ENDPOINT` | `https://localhost:8081` | Account endpoint. |
 | `--key` | `AZURE_COSMOS_KEY` | emulator key | Account key (key auth). |
 | `--connection-string` | `AZURE_COSMOS_CONNECTION_STRING` | — | `AccountEndpoint=...;AccountKey=...;`. The literal `emulator` expands to the local emulator. Overrides `--endpoint`/`--key`. |
-| `--auth` | — | `key` | `key` or `aad` (Entra ID via the developer-tools credential chain). |
+| `--auth` | — | `key` | `key`, `aad` (Entra ID via the developer-tools credential chain — developer machines only), or `workload-identity` (Entra ID via AKS workload identity — in-cluster only). |
 | `--region` | `AZURE_COSMOS_REGION` | `West US` | Application region for proximity routing. |
 | `--emulator` | — | auto | Relax TLS validation; auto-enabled for `localhost`/`127.0.0.1`. For a custom (non-local) emulator host it exports `AZURE_COSMOS_EMULATOR_HOST` so the SDK relaxes validation for that host. |
 | `--database` / `--container` | — | `observability_soak` / `items` | Created if missing. |
@@ -204,5 +204,12 @@ authoritative list.
   though — a workspace-wide `--all-features` also enables
   `azure_data_cosmos/hmac_openssl`, which fails to build on Windows hosts
   without OpenSSL.
+
+## Running this continuously in Azure
+
+[`deploy/`](deploy/README.md) has everything needed to run this harness as a
+long-lived soak on AKS, publishing to Azure Managed Grafana via managed
+Prometheus so the team gets a persistent regression dashboard rather than a
+laptop-local one.
 
 [emulator-docs]: https://learn.microsoft.com/azure/cosmos-db/how-to-develop-emulator

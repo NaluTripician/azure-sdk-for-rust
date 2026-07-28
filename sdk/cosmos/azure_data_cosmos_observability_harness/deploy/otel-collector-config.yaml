@@ -1,0 +1,112 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+# OpenTelemetry Collector configuration for the *cloud* soak (AKS).
+#
+# Differs from the local `docker compose` config
+# (`../../azure_data_cosmos_benchmarks/observability/otel-collector-config.yaml`)
+# in three ways:
+#
+#   1. No `debug` exporter on the metrics pipeline. A 24x7 soak would turn the
+#      collector log into a firehose, and a pod log is not where anyone reads
+#      steady-state metrics from.
+#   2. `memory_limiter` runs first in every pipeline. The collector is a
+#      long-lived pod with a hard memory limit; without it an OTLP burst during
+#      an injected fault window can OOM-kill the collector and silently drop the
+#      very data the fault was meant to produce.
+#   3. Traces go to the `azuremonitor` exporter when an Application Insights
+#      connection string is wired in, so the "rich on error" span trees are
+#      queryable after the fact instead of scrolling out of a pod log.
+#
+# The Prometheus exporter on :8889 is what Azure Monitor Managed Prometheus
+# scrapes (see the pod annotations in `soak-deployment.yaml`).
+#
+# Placeholders are substituted by `deploy-soak.sh` via envsubst.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: cosmos-observability-soak
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      # Shed load before the container limit is hit rather than after.
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 20
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+      # Stamp every series with the cluster and the SDK build under test so a
+      # regression can be attributed to a specific commit, and so two soaks
+      # (baseline vs candidate) can share one Azure Monitor workspace.
+      resource:
+        attributes:
+          - key: k8s.cluster.name
+            value: "${AKS_CLUSTER}"
+            action: upsert
+          - key: service.version
+            value: "${COMMIT_SHA}"
+            action: upsert
+          - key: deployment.environment
+            value: "${SOAK_ENVIRONMENT}"
+            action: upsert
+
+    exporters:
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        send_timestamps: true
+        enable_open_metrics: true
+        # Turn OTLP resource attributes (service.name, service.version,
+        # k8s.cluster.name, ...) into Prometheus labels so the dashboard can
+        # slice by build and cluster.
+        resource_to_telemetry_conversion:
+          enabled: true
+        # Without this the collector keeps serving a series forever after the
+        # harness pod that produced it is gone, so a crashed workload looks
+        # healthy (flat line) instead of going stale.
+        metric_expiration: 10m
+
+      # Only referenced by the traces pipeline when an Application Insights
+      # connection string was supplied; otherwise ${TRACE_EXPORTERS} renders as
+      # `nop` and this block is inert.
+      azuremonitor:
+        connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
+        spans_per_second: 50
+        maxbatchsize: 1024
+        maxbatchinterval: 10s
+
+      # Terminal sink used when tracing has no backend configured. Keeps the
+      # traces pipeline valid without writing anything anywhere.
+      nop: {}
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [prometheus]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [${TRACE_EXPORTERS}]

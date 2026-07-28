@@ -1,0 +1,29 @@
+{
+  "import": [
+    "../.cspell.json"
+  ],
+  "ignoreWords": [
+    "apiserver",
+    "argjson",
+    "azuremonitor",
+    "cadvisor",
+    "configmap",
+    "coredns",
+    "cosmosrustobssoakacr",
+    "daemonset",
+    "envsubst",
+    "kubelet",
+    "kubeproxy",
+    "kubestate",
+    "maxbatchinterval",
+    "maxbatchsize",
+    "nodeexporter",
+    "podannotationnamespaceregex",
+    "podannotations",
+    "prometheuscollectorhealth",
+    "serviceaccount",
+    "unthrottled",
+    "windowsexporter",
+    "windowskubeproxy"
+  ]
+}
