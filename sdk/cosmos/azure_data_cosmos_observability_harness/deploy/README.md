@@ -175,14 +175,57 @@ FAULT_CANARY_REPLICAS=0 ./deploy-soak.sh --no-build
 
 ## Cost
 
-The recurring spend is the AKS node pool, the Cosmos account's provisioned
-throughput, the Azure Monitor workspace (billed per metric sample ingested and
-per query), and Azure Managed Grafana.
+Retail US prices, Central US, pulled from the Azure retail price API. Treat the
+ingestion rows as estimates — series counts depend on how many pods share the
+cluster — and true them up with the query at the end of this section.
 
-The defaults keep this small on purpose: `TARGET_RPS=20`, 400 RU/s, a 15s metric
-export interval, and two small nodes. The point is a *continuous* signal, not a
-load test — raising the request rate mostly buys a larger Azure Monitor bill and
-429s that obscure the SDK behavior you are trying to measure.
+| Item | Rate | Monthly |
+| --- | --- | --- |
+| Azure Managed Grafana, Standard | $0.04207/hr | **~$31** |
+| Grafana **Viewer** seats | free, unlimited | **$0** |
+| Grafana Editor/Admin seats | $6/user/mo | $6 × editors |
+| Azure Monitor metric ingestion | $0.16 / 10M samples | see below |
+| Azure Monitor Prometheus queries | $0.001 / 10M samples | ~$0 |
+| AKS node, `Standard_D4s_v5` Linux | $0.217/hr | **~$158 each** |
+| Cosmos, 400 RU/s provisioned | — | ~$23 |
+
+Viewers being free and unlimited is the part that matters for "accessible to
+anyone on the team": add the whole team as Viewers and the Grafana bill does not
+move.
+
+**Ingestion.** At a 15s scrape a single series costs ~172.8K samples/month, so
+~$0.0028 per series per month. Rough per-target figures on a 4-node cluster:
+
+| Target | Approx. series | Monthly |
+| --- | --- | --- |
+| The soak's own SDK metrics (both deployments + collector) | ~2,000 | ~$6 |
+| `cadvisor` (cluster-wide, 30s) | ~20,000 | ~$28 |
+| `kubestate` (cluster-wide, 30s) | ~3,000 | ~$4 |
+| `nodeexporter` (30s) | ~4,000 | ~$6 |
+| `kubelet` (30s) | ~2,000 | ~$3 |
+
+The infra targets are **cluster-wide, not namespace-scoped** — on a shared
+cluster they ingest every other workload's pods too, which is why they dominate
+and why the defaults in `common.sh` disable `kubelet` and `nodeexporter`.
+`cadvisor` is left on because `container_memory_working_set_bytes` is what
+surfaces an SDK memory leak over weeks, which is exactly what a soak is for; set
+`SCRAPE_CADVISOR=false` if that is not worth ~$28/month to you.
+
+**Reusing an existing cluster is the single biggest lever.** A cluster that is
+already running costs nothing extra to schedule three small pods onto; a
+dedicated two-node `D4s_v5` pool is ~$317/month on its own.
+
+Measure actual ingestion after a week and adjust, rather than trusting the table
+above — in Grafana's Explore, against the Prometheus datasource:
+
+```promql
+topk(20, count by (__name__) ({__name__!=""}))
+```
+
+The defaults keep the workload side small on purpose: `TARGET_RPS=20`, 400 RU/s,
+a 15s export interval. The point is a *continuous* signal, not a load test —
+raising the request rate mostly buys a larger Azure Monitor bill and 429s that
+obscure the SDK behavior you are trying to measure.
 
 ## Tear down
 

@@ -87,6 +87,28 @@ export SCRIPT_DIR REPO_ROOT
 : "${FAULT_PROBABILITY:=0.25}"
 : "${FAULT_ERROR:=service-unavailable}"
 
+# Cluster infrastructure scrape targets. These are billed per ingested sample
+# and, unlike the pod-annotation job, they are NOT namespace-scoped -- they
+# scrape the whole cluster, so on a shared cluster they pull in every other
+# team's pods too. Defaults are deliberately lean: keep what tells you the soak
+# itself is healthy, drop what only describes the nodes underneath it.
+#
+#   cadvisor     container CPU/memory -> catches an SDK memory leak over weeks.
+#                Highest cardinality of the four; the one to drop first if the
+#                bill matters more than leak detection.
+#   kubestate    pod restarts / deployment availability -> tells you the soak died.
+#   collectorhealth  scrape-pipeline liveness. Tiny, and without it a broken
+#                scrape looks identical to a healthy-but-idle workload.
+#   kubelet      kubelet's own operational metrics. Not about our workload.
+#   nodeexporter node OS metrics. Irrelevant to SDK regression tracking.
+#
+# See "Cost" in README.md for measured per-target estimates.
+: "${SCRAPE_CADVISOR:=true}"
+: "${SCRAPE_KUBESTATE:=true}"
+: "${SCRAPE_COLLECTOR_HEALTH:=true}"
+: "${SCRAPE_KUBELET:=false}"
+: "${SCRAPE_NODEEXPORTER:=false}"
+
 # Optional Application Insights connection string for the traces pipeline. When
 # empty the collector's traces pipeline terminates in `nop`.
 : "${APPLICATIONINSIGHTS_CONNECTION_STRING:=}"
@@ -106,7 +128,8 @@ export SUBSCRIPTION_ID RESOURCE_GROUP LOCATION ACR_NAME AKS_CLUSTER \
     FAULT_CANARY_REPLICAS FAULT_CANARY_CONCURRENCY FAULT_CANARY_RPS \
     FAULT_CYCLE_SECS FAULT_START_SECS FAULT_DURATION_SECS FAULT_PROBABILITY \
     FAULT_ERROR APPLICATIONINSIGHTS_CONNECTION_STRING TEAM_ENTRA_GROUP \
-    TEAM_GRAFANA_ROLE
+    TEAM_GRAFANA_ROLE SCRAPE_CADVISOR SCRAPE_KUBESTATE SCRAPE_COLLECTOR_HEALTH \
+    SCRAPE_KUBELET SCRAPE_NODEEXPORTER
 
 # --- Helpers -----------------------------------------------------------------
 
@@ -170,5 +193,6 @@ render_manifest() {
         READ_WEIGHT WRITE_WEIGHT QUERY_WEIGHT METRIC_EXPORT_INTERVAL_SECS \
         FAULT_CANARY_REPLICAS FAULT_CANARY_CONCURRENCY FAULT_CANARY_RPS \
         FAULT_CYCLE_SECS FAULT_START_SECS FAULT_DURATION_SECS \
-        FAULT_PROBABILITY FAULT_ERROR)" <"$file"
+        FAULT_PROBABILITY FAULT_ERROR SCRAPE_CADVISOR SCRAPE_KUBESTATE \
+        SCRAPE_COLLECTOR_HEALTH SCRAPE_KUBELET SCRAPE_NODEEXPORTER)" <"$file"
 }

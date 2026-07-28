@@ -27,15 +27,19 @@ data:
   # annotated pod in the cluster into the same Azure Monitor workspace.
   pod-annotation-based-scraping: |-
     podannotationnamespaceregex = "${NAMESPACE}"
+  # These four targets are cluster-wide, not namespace-scoped: on a shared
+  # cluster they ingest every other workload's pods as well. Defaults keep the
+  # signals that describe the soak's own health and drop the ones that only
+  # describe the nodes under it. See "Cost" in README.md.
   default-scrape-settings-enabled: |-
-    kubelet = true
+    kubelet = ${SCRAPE_KUBELET}
     coredns = false
-    cadvisor = true
+    cadvisor = ${SCRAPE_CADVISOR}
     kubeproxy = false
     apiserver = false
-    kubestate = true
-    nodeexporter = true
-    prometheuscollectorhealth = true
+    kubestate = ${SCRAPE_KUBESTATE}
+    nodeexporter = ${SCRAPE_NODEEXPORTER}
+    prometheuscollectorhealth = ${SCRAPE_COLLECTOR_HEALTH}
     windowsexporter = false
     windowskubeproxy = false
   # 15s matches the harness's default metric export interval, so the scrape does

@@ -7,6 +7,7 @@
     "argjson",
     "azuremonitor",
     "cadvisor",
+    "collectorhealth",
     "configmap",
     "coredns",
     "cosmosrustobssoakacr",
@@ -22,6 +23,7 @@
     "podannotations",
     "prometheuscollectorhealth",
     "serviceaccount",
+    "topk",
     "unthrottled",
     "windowsexporter",
     "windowskubeproxy"
