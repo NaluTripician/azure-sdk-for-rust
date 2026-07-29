@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# cspell:ignore agentpool
+
 # Long-running Cosmos DB Rust SDK observability soak, deployed to AKS.
 #
 # `${VAR}` placeholders are rendered by `deploy-soak.sh` with envsubst, matching
@@ -74,6 +76,25 @@ spec:
         # edit is silently ignored until something else restarts the pod.
         checksum/config: "${COLLECTOR_CONFIG_CHECKSUM}"
     spec:
+      # Same node isolation as the harness pods below; the collector is the
+      # scrape target for both, so stranding it on a perf node would put the
+      # whole pipeline in contention.
+      nodeSelector:
+        agentpool: ${SOAK_NODE_POOL}
+      tolerations:
+        - key: ${SOAK_NODE_TAINT_KEY}
+          operator: Equal
+          value: ${SOAK_NODE_TAINT_VALUE}
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: ${PERF_POD_LABEL}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: otel-collector
           image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION}
@@ -164,6 +185,32 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: cosmos-obs-soak
+      # Keep the soak off the perf harness's nodes. The perf harness pins one
+      # pod per node and a CronJob tunes it to ~80% CPU, so anything else on
+      # that node steals from a deliberately saturated measurement: perf latency
+      # inflates, the tuner cuts concurrency in response, and the soak inherits
+      # the contention as latency noise. Both datasets go bad at once.
+      #
+      # The nodeSelector is the actual guarantee (SOAK_NODE_POOL is a dedicated,
+      # tainted pool when sharing a cluster). The anti-affinity is a *preference*
+      # so that a mistyped pool name degrades to "scheduled on some other node"
+      # rather than a pod that sits Pending and silently records no history.
+      nodeSelector:
+        agentpool: ${SOAK_NODE_POOL}
+      tolerations:
+        - key: ${SOAK_NODE_TAINT_KEY}
+          operator: Equal
+          value: ${SOAK_NODE_TAINT_VALUE}
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: ${PERF_POD_LABEL}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: harness
           image: ${ACR_LOGIN_SERVER}/${IMAGE_REPOSITORY}:${IMAGE_TAG}
@@ -229,6 +276,24 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: cosmos-obs-soak
+      # See the steady deployment above for why the soak never shares a node
+      # with the perf harness.
+      nodeSelector:
+        agentpool: ${SOAK_NODE_POOL}
+      tolerations:
+        - key: ${SOAK_NODE_TAINT_KEY}
+          operator: Equal
+          value: ${SOAK_NODE_TAINT_VALUE}
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: ${PERF_POD_LABEL}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: harness
           image: ${ACR_LOGIN_SERVER}/${IMAGE_REPOSITORY}:${IMAGE_TAG}

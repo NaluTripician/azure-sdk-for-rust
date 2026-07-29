@@ -14,22 +14,27 @@
 #   ./deploy-soak.sh --no-build      redeploy manifests with the current image
 #   ./deploy-soak.sh --tag v1.2.3    build and tag explicitly
 #   ./deploy-soak.sh --local         build with the local Docker daemon instead
+#   ./deploy-soak.sh --force-scrape-config
+#                                    overwrite another workload's ama-metrics
+#                                    settings ConfigMap (see below)
 
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 DO_BUILD=true
 USE_LOCAL_DOCKER=false
+FORCE_SCRAPE_CONFIG=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --no-build) DO_BUILD=false ;;
     --local) USE_LOCAL_DOCKER=true ;;
+    --force-scrape-config) FORCE_SCRAPE_CONFIG=true ;;
     --tag)
         IMAGE_TAG="${2:?--tag requires a value}"
         shift
         ;;
     -h | --help)
-        sed -n '2,20p' "${BASH_SOURCE[0]}"
+        sed -n '2,19p' "${BASH_SOURCE[0]}"
         exit 0
         ;;
     *) die "unknown option: $1" ;;
@@ -37,7 +42,7 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-require_cmd az kubectl envsubst git
+require_cmd az kubectl envsubst git jq
 require_var SUBSCRIPTION_ID
 az_select_subscription
 
@@ -126,13 +131,53 @@ az aks get-credentials \
 
 # --- Managed Prometheus scrape configuration ---------------------------------
 
+# `ama-metrics-settings-configmap` lives in kube-system and is cluster-wide, so
+# on a cluster shared with the perf harness it is the one piece of soak
+# configuration that can affect somebody else. Applying ours over a ConfigMap
+# another workload owns would silently change which namespaces get scraped and
+# which default targets are on. Claim it only if it is unowned or already ours.
 log "Enabling managed Prometheus pod-annotation scraping for ${NAMESPACE}"
-render_manifest "${SCRIPT_DIR}/ama-metrics-settings-configmap.yaml" | kubectl apply -f -
-# The ama-metrics agent reads its ConfigMap at startup only, so a config change
-# is inert until the agent restarts. Names differ across addon versions; a
-# missing one is not fatal.
-kubectl rollout restart deployment/ama-metrics -n kube-system 2>/dev/null || true
-kubectl rollout restart daemonset/ama-metrics-node -n kube-system 2>/dev/null || true
+EXISTING_SCRAPE_CONFIG="$(kubectl get configmap ama-metrics-settings-configmap \
+    -n kube-system -o json 2>/dev/null || true)"
+
+APPLY_SCRAPE_CONFIG=true
+if [[ -n "${EXISTING_SCRAPE_CONFIG}" ]] && ! $FORCE_SCRAPE_CONFIG; then
+    OWNER="$(printf '%s' "${EXISTING_SCRAPE_CONFIG}" |
+        jq -r '.data["config-version"] // ""' 2>/dev/null || true)"
+    if [[ "${OWNER}" != "cosmos-observability-soak" ]]; then
+        # Someone else's. If they already opted our namespace in, there is
+        # nothing to do; otherwise stop rather than take their configuration
+        # over behind their back.
+        LIVE_REGEX="$(printf '%s' "${EXISTING_SCRAPE_CONFIG}" |
+            jq -r '.data["pod-annotation-based-scraping"] // ""' 2>/dev/null || true)"
+        if [[ "${LIVE_REGEX}" == *"${NAMESPACE}"* ]]; then
+            log "ama-metrics settings owned by '${OWNER:-<unlabelled>}' already include ${NAMESPACE}; leaving it alone"
+            APPLY_SCRAPE_CONFIG=false
+        else
+            die "ama-metrics-settings-configmap in kube-system is owned by another workload
+(config-version='${OWNER:-<unlabelled>}') and does not scrape ${NAMESPACE}.
+
+Overwriting it would change scraping for whatever deployed it. Add this
+namespace to its podannotationnamespaceregex instead:
+
+  kubectl edit configmap ama-metrics-settings-configmap -n kube-system
+
+  pod-annotation-based-scraping: |-
+    podannotationnamespaceregex = \"<their-namespaces>|${NAMESPACE}\"
+
+then re-run this script. Pass --force-scrape-config to overwrite anyway."
+        fi
+    fi
+fi
+
+if $APPLY_SCRAPE_CONFIG; then
+    render_manifest "${SCRIPT_DIR}/ama-metrics-settings-configmap.yaml" | kubectl apply -f -
+    # The ama-metrics agent reads its ConfigMap at startup only, so a config
+    # change is inert until the agent restarts. Names differ across addon
+    # versions; a missing one is not fatal.
+    kubectl rollout restart deployment/ama-metrics -n kube-system 2>/dev/null || true
+    kubectl rollout restart daemonset/ama-metrics-node -n kube-system 2>/dev/null || true
+fi
 
 # --- Collector + workload ----------------------------------------------------
 

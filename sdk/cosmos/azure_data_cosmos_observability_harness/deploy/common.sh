@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-# cspell:ignore mwarn merror
+# cspell:ignore mwarn merror soakpool
 
 # Shared configuration and helpers for the Cosmos observability soak scripts.
 #
@@ -41,6 +41,43 @@ export SCRIPT_DIR REPO_ROOT
 # Set to point the soak at an existing Cosmos account in another resource group;
 # provisioning then only assigns data-plane RBAC instead of creating an account.
 : "${COSMOS_ACCOUNT_RESOURCE_GROUP:=${RESOURCE_GROUP}}"
+
+# --- Sharing a cluster with the Cosmos perf harness ---------------------------
+#
+# `provision-soak-infra.sh --attach-to-perf` reuses the cluster, registry,
+# Grafana workspace and managed identity that the Cosmos perf harness
+# (`rust-perf/deploy/deploy-k8s-deployments.sh` in the cosmos-sdk-copilot-toolkit
+# repo) already stands up, so a new tenant is one deployment rather than two
+# parallel stacks. Only what the perf harness has no equivalent of gets created:
+# an Azure Monitor workspace, the managed Prometheus addon, a dedicated node
+# pool, and the soak's own Cosmos account.
+#
+# Set PERF_RESOURCE_GROUP; the rest is discovered from it when left empty.
+: "${PERF_RESOURCE_GROUP:=}"
+: "${PERF_AKS_CLUSTER:=}"
+: "${PERF_ACR_NAME:=}"
+: "${PERF_GRAFANA_NAME:=}"
+: "${PERF_MANAGED_IDENTITY:=}"
+
+# The label the perf harness puts on its pods. The soak steers away from nodes
+# carrying it (see SOAK_NODE_POOL below).
+: "${PERF_POD_LABEL:=cosmos-perf}"
+
+# Node pool the soak runs on. The perf harness pins exactly one perf pod per node
+# with a required pod anti-affinity, then a CronJob tunes each pod's concurrency
+# until it sits at ~80% CPU. A soak pod sharing those nodes would take CPU from a
+# deliberately CPU-saturated measurement: perf latency inflates, the tuner reacts
+# by cutting concurrency, and the soak's own latency picks up the contention.
+# Both datasets get corrupted, so the soak always gets its own pool.
+#
+# Named the same in both modes so the manifests need no conditionals: standalone
+# provisioning names the cluster's initial pool this, and --attach-to-perf adds
+# it to the perf cluster tainted so nothing else lands on it.
+: "${SOAK_NODE_POOL:=soakpool}"
+: "${SOAK_NODE_SIZE:=Standard_D2s_v5}"
+: "${SOAK_NODE_COUNT:=1}"
+: "${SOAK_NODE_TAINT_KEY:=workload}"
+: "${SOAK_NODE_TAINT_VALUE:=soak}"
 
 # Application region for proximity routing. The harness expects an Azure region
 # *display* name ("West US 2"), not a slug, so `deploy-soak.sh` reads the
@@ -129,7 +166,10 @@ export SUBSCRIPTION_ID RESOURCE_GROUP LOCATION ACR_NAME AKS_CLUSTER \
     FAULT_CYCLE_SECS FAULT_START_SECS FAULT_DURATION_SECS FAULT_PROBABILITY \
     FAULT_ERROR APPLICATIONINSIGHTS_CONNECTION_STRING TEAM_ENTRA_GROUP \
     TEAM_GRAFANA_ROLE SCRAPE_CADVISOR SCRAPE_KUBESTATE SCRAPE_COLLECTOR_HEALTH \
-    SCRAPE_KUBELET SCRAPE_NODEEXPORTER
+    SCRAPE_KUBELET SCRAPE_NODEEXPORTER \
+    PERF_RESOURCE_GROUP PERF_AKS_CLUSTER PERF_ACR_NAME PERF_GRAFANA_NAME \
+    PERF_MANAGED_IDENTITY PERF_POD_LABEL SOAK_NODE_POOL SOAK_NODE_SIZE \
+    SOAK_NODE_COUNT SOAK_NODE_TAINT_KEY SOAK_NODE_TAINT_VALUE
 
 # --- Helpers -----------------------------------------------------------------
 
@@ -194,5 +234,7 @@ render_manifest() {
         FAULT_CANARY_REPLICAS FAULT_CANARY_CONCURRENCY FAULT_CANARY_RPS \
         FAULT_CYCLE_SECS FAULT_START_SECS FAULT_DURATION_SECS \
         FAULT_PROBABILITY FAULT_ERROR SCRAPE_CADVISOR SCRAPE_KUBESTATE \
-        SCRAPE_COLLECTOR_HEALTH SCRAPE_KUBELET SCRAPE_NODEEXPORTER)" <"$file"
+        SCRAPE_COLLECTOR_HEALTH SCRAPE_KUBELET SCRAPE_NODEEXPORTER \
+        PERF_POD_LABEL SOAK_NODE_POOL SOAK_NODE_TAINT_KEY \
+        SOAK_NODE_TAINT_VALUE)" <"$file"
 }

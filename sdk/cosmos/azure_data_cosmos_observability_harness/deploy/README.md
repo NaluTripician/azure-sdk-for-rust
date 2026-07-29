@@ -2,6 +2,7 @@
 Copyright (c) Microsoft Corporation. All rights reserved.
 Licensed under the MIT License.
 -->
+<!-- cSpell:ignore agentpool nodepool soakpool uids -->
 
 # Long-running Cosmos DB Rust SDK observability soak
 
@@ -18,11 +19,12 @@ team watches in Azure are never out of sync.
 ## Architecture
 
 ```text
-AKS  ns/cosmos-observability-soak
- ├─ cosmos-obs-soak-steady    baseline: never stops, never injects faults
- ├─ cosmos-obs-soak-canary    recurring fault windows, separate container
- └─ otel-collector            OTLP in → Prometheus exporter :8889
-             ▲ scraped by
+AKS  nodepool/soakpool          dedicated, tainted — never shares a node with perf
+ └─ ns/cosmos-observability-soak
+     ├─ cosmos-obs-soak-steady    baseline: never stops, never injects faults
+     ├─ cosmos-obs-soak-canary    recurring fault windows, separate container
+     └─ otel-collector            OTLP in → Prometheus exporter :8889
+                 ▲ scraped by
 Azure Monitor Managed Prometheus (AKS addon)
  └─ Azure Monitor workspace       long metric retention → regression history
         └─ Azure Managed Grafana  Entra SSO, team access by security group
@@ -32,6 +34,10 @@ Azure Monitor Managed Prometheus (AKS addon)
 Everything on the storage and presentation side is managed. There is no
 Prometheus or Grafana instance to patch, back up, or wake up for at 2am — which
 matters for something meant to run unattended for months.
+
+The cluster, registry, Grafana workspace and identity can all be shared with the
+Cosmos perf harness — see [Sharing the Cosmos perf harness's
+cluster](#sharing-the-cosmos-perf-harnesss-cluster).
 
 ### Why two workloads
 
@@ -76,8 +82,58 @@ managed Prometheus addon linked, a Cosmos DB account, and a user-assigned manage
 identity federated to the pod's service account and granted the **Cosmos DB
 Built-in Data Contributor** data-plane role.
 
-It prints four values at the end. Add them to `soak.env` (or skip it — the deploy
-script looks them up from Azure when they are unset).
+It prints a block of values at the end. Add them to `soak.env` (or skip it — the
+deploy script looks them up from Azure when they are unset).
+
+### Sharing the Cosmos perf harness's cluster
+
+When the Cosmos perf harness (`rust-perf/deploy/deploy-k8s-deployments.sh` in the
+`cosmos-sdk-copilot-toolkit` repo) is already deployed — for example into an
+ephemeral tenant that gets recreated periodically — the soak can attach to it
+instead of standing up a parallel stack, so a new tenant is one deployment
+rather than two:
+
+```bash
+PERF_RESOURCE_GROUP=<the perf harness's resource group> \
+  ./provision-soak-infra.sh --attach-to-perf --dry-run
+```
+
+The cluster, container registry, Grafana workspace and managed identity are
+discovered from that resource group and reused. Only what the perf harness has no
+equivalent of gets created:
+
+| Created | Why the perf harness has no equivalent |
+| --- | --- |
+| Azure Monitor workspace | Perf results go to ADX; there is no Prometheus store |
+| Managed Prometheus addon | Same — and it is what puts a Prometheus datasource in the shared Grafana |
+| `soakpool` node pool | Every perf node is deliberately CPU-saturated (see below) |
+| Cosmos account | Perf's workload account is under continuous load |
+| A second federated credential | One identity, two service accounts — no new principal |
+
+Set `PERF_AKS_CLUSTER`, `PERF_ACR_NAME`, `PERF_GRAFANA_NAME` or
+`PERF_MANAGED_IDENTITY` explicitly only if the group holds more than one
+candidate; discovery reports the ambiguity rather than guessing.
+
+The two dashboards stay separate — the soak's is PromQL, perf's is KQL over ADX —
+but they live in the same Grafana workspace, so the team follows one link and one
+set of permissions.
+
+#### Two things to know before attaching
+
+**The soak never shares a node with perf.** The perf harness pins exactly one pod
+per node with a required anti-affinity, then a CronJob raises each pod's
+concurrency until it sits at ~80% CPU. A soak pod on that node would take CPU
+from a deliberately saturated measurement: perf latency inflates, the tuner cuts
+concurrency in response, and the soak picks up the contention as latency noise of
+its own — both datasets go bad at once. So the soak gets its own small tainted
+pool (`SOAK_NODE_POOL`, one `Standard_D2s_v5` by default, ~$70/month) and the pod
+specs carry a matching `nodeSelector` and toleration.
+
+**Enabling managed Prometheus perturbs perf once.** The addon runs an
+`ama-metrics` DaemonSet on *every* node, including perf's, so perf pods lose a
+small slice of CPU from the moment it is turned on. The concurrency tuner absorbs
+it within a cycle, but perf results either side of that change are not strictly
+comparable. Enable it at a point where a baseline reset is acceptable.
 
 ### Using an existing Cosmos account
 
@@ -106,6 +162,14 @@ attributed to a specific commit.
 ./deploy-soak.sh --local        # build with a local Docker daemon
 ```
 
+One piece of what it applies is cluster-wide rather than namespaced:
+`ama-metrics-settings-configmap` in `kube-system`, which is what opts the soak's
+namespace into pod-annotation scraping. On a shared cluster the script refuses to
+overwrite that ConfigMap if another workload owns it — it either finds the soak's
+namespace already opted in and leaves it alone, or stops and prints the edit to
+make. `--force-scrape-config` overrides, at the cost of changing scraping for
+whatever deployed it.
+
 ## Publish the dashboard and grant access
 
 ```bash
@@ -117,7 +181,10 @@ attributed to a specific commit.
 [`cosmos-observability.json`](../../azure_data_cosmos_benchmarks/dashboards/cosmos-observability.json)
 verbatim, resolves the managed Prometheus data source uid, and updates in place —
 it preserves the live dashboard's id and version, so bookmarks keep working
-instead of accumulating duplicate copies.
+instead of accumulating duplicate copies. In a Grafana workspace shared with the
+perf harness it filters for the Prometheus data source specifically, so it never
+binds the panels to perf's Azure Data Explorer source, and both dashboards
+coexist under their own uids.
 
 `grant-team-access.sh` assigns **Grafana Viewer** on the Grafana workspace *and*
 **Monitoring Data Reader** on the Azure Monitor workspace. Both are needed: with
@@ -126,6 +193,10 @@ exactly like a broken soak.
 
 Assign to a group, not to individuals, so joiners and leavers are handled by
 group membership.
+
+Grafana Viewer is a **workspace-level** role: on a shared workspace it also grants
+the perf harness's dashboards. That is usually what you want for one team, but it
+is worth knowing before adding a group that should only see the soak.
 
 ## Alerts
 
@@ -211,9 +282,10 @@ and why the defaults in `common.sh` disable `kubelet` and `nodeexporter`.
 surfaces an SDK memory leak over weeks, which is exactly what a soak is for; set
 `SCRAPE_CADVISOR=false` if that is not worth ~$28/month to you.
 
-**Reusing an existing cluster is the single biggest lever.** A cluster that is
-already running costs nothing extra to schedule three small pods onto; a
-dedicated two-node `D4s_v5` pool is ~$317/month on its own.
+**Reusing an existing cluster is the single biggest lever.** Attaching to the perf
+harness's cluster (`--attach-to-perf`) costs one small node for the soak's own
+pool rather than a full dedicated cluster: ~$70/month against ~$317/month for a
+dedicated two-node `D4s_v5` pool.
 
 Measure actual ingestion after a week and adjust, rather than trusting the table
 above — in Grafana's Explore, against the Prometheus datasource:
@@ -236,6 +308,35 @@ az group delete --name "$RESOURCE_GROUP" --yes --no-wait
 Deletes everything including the metric history. To keep the history, delete only
 the AKS cluster and Cosmos account.
 
+**When attached to the perf harness** `RESOURCE_GROUP` is the *perf* group, so
+that command would take the perf harness with it. Remove just the soak instead:
+
+```bash
+kubectl delete namespace "$NAMESPACE"
+az aks nodepool delete --cluster-name "$AKS_CLUSTER" \
+  --resource-group "$RESOURCE_GROUP" --name "$SOAK_NODE_POOL"
+az cosmosdb delete --name "$COSMOS_ACCOUNT" \
+  --resource-group "$COSMOS_ACCOUNT_RESOURCE_GROUP" --yes
+az monitor account delete --name "$MONITOR_WORKSPACE" \
+  --resource-group "$RESOURCE_GROUP" --yes
+```
+
+The managed Prometheus addon is left on the cluster deliberately: disabling it is
+a second CPU perturbation for the perf pods, and an addon with nothing annotated
+to scrape costs almost nothing.
+
+### Ephemeral tenants
+
+If the tenant is recreated periodically, the Azure Monitor workspace goes with it
+and the regression history starts over — which defeats the point of a soak. Two
+ways out, in preference order:
+
+1. Keep the Azure Monitor workspace and Grafana in a **long-lived** subscription
+   and point only the cluster at them. `--attach-to-perf` puts them in the perf
+   group by default; set `MONITOR_WORKSPACE`/`GRAFANA_NAME` (and provision them
+   once, by hand, elsewhere) to split them out.
+2. Accept per-tenant history and export the series that matter before teardown.
+
 ## Troubleshooting
 
 **Every panel says "No data".** The managed Prometheus agent only scrapes
@@ -255,6 +356,21 @@ federated credential still points at the old subject — re-run
 **`--auth workload-identity` fails locally.** It is only for in-cluster use. Use
 `--auth aad` on a developer machine; that path uses the developer credential
 chain, which cannot work inside a container.
+
+**Pods stay `Pending` and never schedule.** The soak pods select
+`agentpool: $SOAK_NODE_POOL` and tolerate `workload=soak:NoSchedule`, so they only
+land on the soak's own pool. Check the pool exists and matches:
+`az aks nodepool list --cluster-name "$AKS_CLUSTER" --resource-group "$RESOURCE_GROUP" -o table`.
+If it was created under a different name, set `SOAK_NODE_POOL` in `soak.env` and
+re-run `./deploy-soak.sh`; `kubectl describe pod` reports it as
+`node(s) didn't match Pod's node affinity/selector`.
+
+**Perf numbers moved when the soak was deployed.** Two candidates, in order:
+enabling managed Prometheus put an `ama-metrics` DaemonSet on every node
+(one-time, absorbed by the concurrency tuner, but the baseline shifts); or a soak
+pod is on a perf node, which means the `nodeSelector` is not matching — check
+with `kubectl get pods -n "$NAMESPACE" -o wide` and compare against
+`kubectl get pods -n cosmos-perf -o wide`.
 
 **Dashboard shows canary errors as if they were real.** Filter on
 `db_collection_name` — the canary container is suffixed `_canary`.
