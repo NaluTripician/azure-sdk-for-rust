@@ -7,9 +7,10 @@
 // against the same Azure Monitor workspace the dashboard reads from — so an
 // alert and a panel can never disagree about what the data says.
 //
-// Deploy:
+// Deploy into the workspace's resource group, not the cluster's — the rules
+// query the workspace and must live in its region:
 //   az deployment group create \
-//     --resource-group "$RESOURCE_GROUP" \
+//     --resource-group "$MONITOR_RESOURCE_GROUP" \
 //     --template-file alerts/regression-alerts.bicep \
 //     --parameters azureMonitorWorkspaceId="$MONITOR_WORKSPACE_ID" \
 //                  clusterName="$AKS_CLUSTER" \

@@ -37,7 +37,9 @@ matters for something meant to run unattended for months.
 
 The cluster, registry, Grafana workspace and identity can all be shared with the
 Cosmos perf harness — see [Sharing the Cosmos perf harness's
-cluster](#sharing-the-cosmos-perf-harnesss-cluster).
+cluster](#sharing-the-cosmos-perf-harnesss-cluster). The whole deployment is
+designed to be stood up in a tenant that gets recycled every few months; see
+[Moving to a new tenant](#moving-to-a-new-tenant).
 
 ### Why two workloads
 
@@ -85,13 +87,18 @@ Built-in Data Contributor** data-plane role.
 It prints a block of values at the end. Add them to `soak.env` (or skip it — the
 deploy script looks them up from Azure when they are unset).
 
+If this deployment is going into a tenant that gets recycled — which is the
+expected case — decide *now* whether the metric history should live in its own
+resource group, because moving an Azure Monitor workspace later is not a thing
+you can do. See [What happens to the
+history](#what-happens-to-the-history).
+
 ### Sharing the Cosmos perf harness's cluster
 
-When the Cosmos perf harness (`rust-perf/deploy/deploy-k8s-deployments.sh` in the
-`cosmos-sdk-copilot-toolkit` repo) is already deployed — for example into an
-ephemeral tenant that gets recreated periodically — the soak can attach to it
-instead of standing up a parallel stack, so a new tenant is one deployment
-rather than two:
+When the Cosmos DB team's internal Rust perf harness is already deployed — for
+example into an ephemeral tenant that gets recreated periodically — the soak can
+attach to it instead of standing up a parallel stack, so a new tenant is one
+deployment rather than two:
 
 ```bash
 PERF_RESOURCE_GROUP=<the perf harness's resource group> \
@@ -202,13 +209,20 @@ is worth knowing before adding a group that should only see the soak.
 
 ```bash
 MONITOR_WORKSPACE_ID=$(az monitor account show \
-    -n "$MONITOR_WORKSPACE" -g "$RESOURCE_GROUP" --query id -o tsv)
+    -n "$MONITOR_WORKSPACE" -g "$MONITOR_RESOURCE_GROUP" --query id -o tsv)
+MONITOR_WORKSPACE_LOCATION=$(az monitor account show \
+    -n "$MONITOR_WORKSPACE" -g "$MONITOR_RESOURCE_GROUP" --query location -o tsv)
 
+# Deployed alongside the workspace, not the cluster: the rules query the
+# workspace, must sit in its region, and should outlive any cluster rebuild.
+# location is read from the workspace rather than defaulted from the resource
+# group, which can be in a different region than the workspace it holds.
 az deployment group create \
-    --resource-group "$RESOURCE_GROUP" \
+    --resource-group "$MONITOR_RESOURCE_GROUP" \
     --template-file alerts/regression-alerts.bicep \
     --parameters azureMonitorWorkspaceId="$MONITOR_WORKSPACE_ID" \
-                 clusterName="$AKS_CLUSTER"
+                 clusterName="$AKS_CLUSTER" \
+                 location="$MONITOR_WORKSPACE_LOCATION"
 ```
 
 Five rules ship: workload stopped, error rate high, p99 latency regression,
@@ -305,8 +319,10 @@ obscure the SDK behavior you are trying to measure.
 az group delete --name "$RESOURCE_GROUP" --yes --no-wait
 ```
 
-Deletes everything including the metric history. To keep the history, delete only
-the AKS cluster and Cosmos account.
+Deletes everything in that group, including the metric history if the Azure
+Monitor workspace lives there. If `MONITOR_RESOURCE_GROUP` points somewhere else
+— see [What happens to the history](#what-happens-to-the-history) — the history
+and the dashboard survive, which is the point of splitting them out.
 
 **When attached to the perf harness** `RESOURCE_GROUP` is the *perf* group, so
 that command would take the perf harness with it. Remove just the soak instead:
@@ -318,24 +334,158 @@ az aks nodepool delete --cluster-name "$AKS_CLUSTER" \
 az cosmosdb delete --name "$COSMOS_ACCOUNT" \
   --resource-group "$COSMOS_ACCOUNT_RESOURCE_GROUP" --yes
 az monitor account delete --name "$MONITOR_WORKSPACE" \
-  --resource-group "$RESOURCE_GROUP" --yes
+  --resource-group "$MONITOR_RESOURCE_GROUP" --yes
 ```
 
 The managed Prometheus addon is left on the cluster deliberately: disabling it is
 a second CPU perturbation for the perf pods, and an addon with nothing annotated
 to scrape costs almost nothing.
 
-### Ephemeral tenants
+## Moving to a new tenant
 
-If the tenant is recreated periodically, the Azure Monitor workspace goes with it
-and the regression history starts over — which defeats the point of a soak. Two
-ways out, in preference order:
+The soak is expected to run in a tenant that gets recycled every few months, so
+moving it is a routine operation rather than a disaster. Nothing about the
+deployment is tenant-specific except the values in `soak.env`, which is
+git-ignored — so a move is "fill in a new `soak.env`, re-run the same three
+scripts", not "rebuild the deployment".
 
-1. Keep the Azure Monitor workspace and Grafana in a **long-lived** subscription
-   and point only the cluster at them. `--attach-to-perf` puts them in the perf
-   group by default; set `MONITOR_WORKSPACE`/`GRAFANA_NAME` (and provision them
-   once, by hand, elsewhere) to split them out.
-2. Accept per-tenant history and export the series that matter before teardown.
+### What moves and what does not
+
+| | Carries over | Because |
+| --- | --- | --- |
+| Manifests, scripts, Dockerfile, dashboard JSON, alert rules | Yes | All in this repo, all parameterized |
+| Workload configuration (RPS, weights, fault schedule) | Yes | Defaults in `common.sh`; only overrides live in `soak.env` |
+| Resource *names* | Yes | Defaults are tenant-independent |
+| Container image | Rebuilt | One `az acr build`, from the same commit |
+| Cosmos data | No, and it does not matter | The harness seeds its own container on startup |
+| Entra group and role assignments | No | Groups are tenant-scoped; see step 6 |
+| **Metric history** | **No** | See [What happens to the history](#what-happens-to-the-history) |
+| Grafana URL | No | New workspace, new endpoint — the team's bookmark changes |
+
+### Do it with an overlap, not a gap
+
+Stand the new deployment up *before* tearing the old one down. The soak exists to
+produce a continuous trend line, and the fastest way to lose confidence in it is
+a fortnight-long hole while someone finds time to redeploy. Running both for a
+few days also gives you the one thing a fresh deployment otherwise lacks: a
+same-week comparison against known-good numbers, which is how you tell "the new
+tenant's account is slower" from "the SDK regressed".
+
+The overlap has one consequence. Two of the names are globally unique across all
+of Azure — the container registry (`<name>.azurecr.io`) and the Cosmos account
+(`<name>.documents.azure.com`) — so the second deployment cannot reuse them while
+the first is alive. Hence `NAME_SUFFIX`:
+
+```bash
+NAME_SUFFIX="2"     # -> cosmosrustobssoakacr2, cosmos-rust-obs-soak2
+```
+
+Lowercase alphanumeric only; ACR names permit nothing else, and `common.sh`
+rejects anything else up front rather than letting `az` fail three resources in.
+Bump it each move, or drop it once the old deployment is gone and you want the
+plain names back.
+
+### Steps
+
+1. **Get access.** `az login --tenant <new-tenant-id>`, then pick the
+   subscription that will be billed and note its id.
+
+2. **Write the new `soak.env`.** Start from `soak.env.example` again rather than
+   editing the old file — that way a stale value cannot survive by being
+   uncommented and forgotten:
+
+   ```bash
+   cp soak.env.example soak.env
+   # SUBSCRIPTION_ID   the new subscription
+   # NAME_SUFFIX       bump it if the old deployment is still up
+   # PERF_RESOURCE_GROUP   only if attaching to the perf harness
+   ```
+
+   Carry over any deliberate workload overrides (`TARGET_RPS`, `COSMOS_THROUGHPUT`,
+   the `SCRAPE_*` toggles). Changing the workload shape in the same move as the
+   tenant makes any difference in the numbers unattributable.
+
+3. **Provision.** Dry-run first — it prints every name it is about to use, which
+   is where a forgotten `NAME_SUFFIX` shows up:
+
+   ```bash
+   ./provision-soak-infra.sh --dry-run
+   ./provision-soak-infra.sh
+   ```
+
+   Add `--attach-to-perf` if the perf harness is already in the new tenant. It
+   will not be there on day one of a fresh tenant; standalone now and attaching
+   later is fine, and is just another run of this script.
+
+4. **Deploy and publish.**
+
+   ```bash
+   ./deploy-soak.sh
+   ./upload-grafana-dashboard.sh
+   ```
+
+5. **Re-apply the alert rules** — see [Alerts](#alerts). Reuse the thresholds you
+   settled on in the old tenant only if the new Cosmos account is in the same
+   region and SKU; otherwise re-baseline, because a threshold tuned elsewhere
+   will either page constantly or never.
+
+6. **Recreate team access.** Entra groups do not cross tenants, so an object id
+   copied from the old `soak.env` will not resolve — and a role assignment made
+   with a stale id fails loudly rather than silently granting nothing, which is
+   the good case. Create or find the group in the new tenant, then:
+
+   ```bash
+   ./grant-team-access.sh --group "<group display name>"
+   ```
+
+7. **Give the team the new link.** The Grafana endpoint changes. Both
+   `provision-soak-infra.sh` and `grant-team-access.sh` print it.
+
+8. **Verify before you delete anything** — see [Verify](#verify). Specifically:
+   pods `Running` and on the soak node pool, the collector exposing
+   `db_client_operation_duration`, every dashboard panel populated (not just the
+   first), and the canary's `_canary` container showing its fault window. Then
+   leave it for at least one full fault cycle.
+
+9. **Tear down the old deployment** — see [Tear down](#tear-down). Do this last
+   and deliberately; it is what releases the globally-unique names.
+
+### What happens to the history
+
+An Azure Monitor workspace cannot be moved between tenants, and the managed
+Prometheus addon can only write to a workspace in the cluster's own tenant. So
+when the tenant goes, the metric history goes with it, and the new deployment
+starts its trend line at zero. There is no configuration that avoids this.
+
+What you can avoid is losing history to the *much* more frequent event — a
+cluster rebuild. The perf harness redeploys far more often than the tenant is
+recycled, and if the workspace shares a resource group with the cluster, each
+rebuild costs you the trend as surely as a tenant move does. Put the workspace
+and Grafana in their own group:
+
+```bash
+az group create --name cosmos-rust-obs-history-rg --location westus2
+
+# in soak.env
+MONITOR_RESOURCE_GROUP="cosmos-rust-obs-history-rg"
+GRAFANA_RESOURCE_GROUP="cosmos-rust-obs-history-rg"
+```
+
+Provisioning requires that group to already exist and will not create it, so a
+typo cannot quietly strand months of data somewhere nobody looks. Deleting the
+cluster's group then leaves the history and the dashboard untouched; re-running
+`provision-soak-infra.sh` re-links a new cluster to the same workspace and the
+trend continues across the gap.
+
+If continuity across *tenant* boundaries is worth real complexity later, the
+collector — which we control, unlike the addon — can additionally remote-write to
+a workspace in a stable tenant. That needs a service principal and a stored
+credential, so it is a deliberate decision rather than a default, and it is not
+implemented here.
+
+Practically: treat the per-tenant history as the regression signal, and when a
+move is coming, screenshot or export the panels that establish the current
+baseline so the new deployment has something to be compared against.
 
 ## Troubleshooting
 
@@ -374,3 +524,20 @@ with `kubectl get pods -n "$NAMESPACE" -o wide` and compare against
 
 **Dashboard shows canary errors as if they were real.** Filter on
 `db_collection_name` — the canary container is suffixed `_canary`.
+
+**Provisioning fails on a name already in use.** The container registry and
+Cosmos account names are globally unique across Azure, so the usual cause is the
+previous deployment still holding them. Set `NAME_SUFFIX` — see [Do it with an
+overlap, not a gap](#do-it-with-an-overlap-not-a-gap). The same error appears
+briefly after a teardown while the deletion finishes.
+
+**`az account set` says the subscription does not exist.** `soak.env` still has
+the old tenant's `SUBSCRIPTION_ID`, or the session is logged into a different
+tenant. `az login --tenant <new-tenant-id>` and check `az account show`.
+
+**Everything provisions but the dashboard is empty in a tenant that worked
+before.** Check the Grafana workspace the dashboard landed in is the one linked
+to *this* cluster's Azure Monitor workspace. After a move, a stale
+`GRAFANA_NAME`/`GRAFANA_RESOURCE_GROUP` in `soak.env` can point
+`upload-grafana-dashboard.sh` at a workspace whose Prometheus datasource is fed
+by a cluster that no longer exists.

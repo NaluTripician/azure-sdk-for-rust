@@ -3,9 +3,8 @@
 
 # Multi-stage build for the Cosmos DB observability soak harness.
 #
-# Mirrors the shape of the perf harness image (`rust-perf/Dockerfile` in the
-# cosmos-sdk-copilot-toolkit repo) so the two workloads can share an ACR and the
-# same AKS node pool conventions.
+# Mirrors the shape of the Cosmos DB team's internal Rust perf harness image so
+# the two workloads can share an ACR and the same AKS node pool conventions.
 #
 # The build context is the repository root, because the harness depends on the
 # in-repo `azure_data_cosmos` crate via a path dependency:

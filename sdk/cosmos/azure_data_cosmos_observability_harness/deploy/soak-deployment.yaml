@@ -6,8 +6,8 @@
 # Long-running Cosmos DB Rust SDK observability soak, deployed to AKS.
 #
 # `${VAR}` placeholders are rendered by `deploy-soak.sh` with envsubst, matching
-# the convention used by `rust-perf/deploy/perf-deployments.yaml` in the
-# cosmos-sdk-copilot-toolkit repo.
+# the convention the Cosmos DB team's internal Rust perf harness uses for its own
+# manifests.
 #
 # Two workloads run side by side:
 #

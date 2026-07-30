@@ -136,6 +136,12 @@ if $ATTACH_TO_PERF; then
     if [[ "${COSMOS_ACCOUNT_RESOURCE_GROUP}" == "${STANDALONE_RESOURCE_GROUP}" ]]; then
         COSMOS_ACCOUNT_RESOURCE_GROUP="${RESOURCE_GROUP}"
     fi
+    if [[ "${MONITOR_RESOURCE_GROUP}" == "${STANDALONE_RESOURCE_GROUP}" ]]; then
+        MONITOR_RESOURCE_GROUP="${RESOURCE_GROUP}"
+    fi
+    # The Grafana workspace *is* the perf harness's, so this one is not a
+    # default that may follow -- it has to be where that workspace actually is.
+    GRAFANA_RESOURCE_GROUP="${RESOURCE_GROUP}"
     if [[ "${MONITOR_LOCATION}" == "${STANDALONE_LOCATION}" ]]; then
         MONITOR_LOCATION="${LOCATION}"
     fi
@@ -157,7 +163,7 @@ Would attach to the perf harness in subscription ${SUBSCRIPTION_ID}:
     managed identity    ${MANAGED_IDENTITY}
 
   creating
-    monitor workspace   ${MONITOR_WORKSPACE} (${MONITOR_LOCATION})
+    monitor workspace   ${MONITOR_WORKSPACE} (${MONITOR_RESOURCE_GROUP}, ${MONITOR_LOCATION})
     prometheus addon    on ${AKS_CLUSTER}, wired to ${GRAFANA_NAME}
     aks node pool       ${SOAK_NODE_POOL} (${SOAK_NODE_COUNT} x ${SOAK_NODE_SIZE}),
                         tainted ${SOAK_NODE_TAINT_KEY}=${SOAK_NODE_TAINT_VALUE}:NoSchedule
@@ -170,8 +176,8 @@ Would provision into subscription ${SUBSCRIPTION_ID}:
 
   resource group        ${RESOURCE_GROUP} (${LOCATION})
   container registry    ${ACR_NAME}
-  monitor workspace     ${MONITOR_WORKSPACE} (${MONITOR_LOCATION})
-  managed grafana       ${GRAFANA_NAME} (${GRAFANA_LOCATION})
+  monitor workspace     ${MONITOR_WORKSPACE} (${MONITOR_RESOURCE_GROUP}, ${MONITOR_LOCATION})
+  managed grafana       ${GRAFANA_NAME} (${GRAFANA_RESOURCE_GROUP}, ${GRAFANA_LOCATION})
   aks cluster           ${AKS_CLUSTER} (${AKS_NODE_COUNT} x ${AKS_NODE_SIZE})
   aks node pool         ${SOAK_NODE_POOL}
   cosmos account        ${COSMOS_ACCOUNT} $($SKIP_COSMOS && echo '(skipped)')
@@ -225,36 +231,51 @@ ACR_LOGIN_SERVER="$(az acr show --name "${ACR_NAME}" --resource-group "${RESOURC
 
 # --- Azure Monitor workspace (managed Prometheus) ----------------------------
 
-log "Azure Monitor workspace ${MONITOR_WORKSPACE}"
+# When the workspace lives outside the main group it is deliberately long-lived
+# and holds the regression history, so require it rather than creating it: a
+# typo here would strand months of data in a group nobody thinks to look in.
+if [[ "${MONITOR_RESOURCE_GROUP}" != "${RESOURCE_GROUP}" ]]; then
+    az group show --name "${MONITOR_RESOURCE_GROUP}" -o none 2>/dev/null ||
+        die "MONITOR_RESOURCE_GROUP ${MONITOR_RESOURCE_GROUP} does not exist. Create it once, deliberately:
+  az group create --name ${MONITOR_RESOURCE_GROUP} --location ${MONITOR_LOCATION}"
+fi
+
+log "Azure Monitor workspace ${MONITOR_WORKSPACE} (${MONITOR_RESOURCE_GROUP})"
 if ! az monitor account show --name "${MONITOR_WORKSPACE}" \
-    --resource-group "${RESOURCE_GROUP}" >/dev/null 2>&1; then
+    --resource-group "${MONITOR_RESOURCE_GROUP}" >/dev/null 2>&1; then
     az monitor account create \
         --name "${MONITOR_WORKSPACE}" \
-        --resource-group "${RESOURCE_GROUP}" \
+        --resource-group "${MONITOR_RESOURCE_GROUP}" \
         --location "${MONITOR_LOCATION}" \
         --only-show-errors -o none
 fi
 MONITOR_WORKSPACE_ID="$(az monitor account show --name "${MONITOR_WORKSPACE}" \
-    --resource-group "${RESOURCE_GROUP}" --query id -o tsv)"
+    --resource-group "${MONITOR_RESOURCE_GROUP}" --query id -o tsv)"
 
 # --- Azure Managed Grafana ---------------------------------------------------
 
-log "Azure Managed Grafana ${GRAFANA_NAME}"
+if [[ "${GRAFANA_RESOURCE_GROUP}" != "${RESOURCE_GROUP}" ]]; then
+    az group show --name "${GRAFANA_RESOURCE_GROUP}" -o none 2>/dev/null ||
+        die "GRAFANA_RESOURCE_GROUP ${GRAFANA_RESOURCE_GROUP} does not exist. Create it once, deliberately:
+  az group create --name ${GRAFANA_RESOURCE_GROUP} --location ${GRAFANA_LOCATION}"
+fi
+
+log "Azure Managed Grafana ${GRAFANA_NAME} (${GRAFANA_RESOURCE_GROUP})"
 if ! az grafana show --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" >/dev/null 2>&1; then
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" >/dev/null 2>&1; then
     if $ATTACH_TO_PERF; then
-        die "Grafana workspace ${GRAFANA_NAME} not found in ${RESOURCE_GROUP}"
+        die "Grafana workspace ${GRAFANA_NAME} not found in ${GRAFANA_RESOURCE_GROUP}"
     fi
     az grafana create \
         --name "${GRAFANA_NAME}" \
-        --resource-group "${RESOURCE_GROUP}" \
+        --resource-group "${GRAFANA_RESOURCE_GROUP}" \
         --location "${GRAFANA_LOCATION}" \
         --only-show-errors -o none
 fi
 GRAFANA_ID="$(az grafana show --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" --query id -o tsv)"
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" --query id -o tsv)"
 GRAFANA_ENDPOINT="$(az grafana show --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" --query properties.endpoint -o tsv)"
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" --query properties.endpoint -o tsv)"
 
 # --- AKS ---------------------------------------------------------------------
 
@@ -438,7 +459,10 @@ Add these to soak.env (or export them) before running ./deploy-soak.sh:
   RESOURCE_GROUP="${RESOURCE_GROUP}"
   AKS_CLUSTER="${AKS_CLUSTER}"
   ACR_NAME="${ACR_NAME}"
+  MONITOR_WORKSPACE="${MONITOR_WORKSPACE}"
+  MONITOR_RESOURCE_GROUP="${MONITOR_RESOURCE_GROUP}"
   GRAFANA_NAME="${GRAFANA_NAME}"
+  GRAFANA_RESOURCE_GROUP="${GRAFANA_RESOURCE_GROUP}"
   SOAK_NODE_POOL="${SOAK_NODE_POOL}"
   ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER}"
   COSMOS_ENDPOINT="${COSMOS_ENDPOINT}"

@@ -28,29 +28,56 @@ export SCRIPT_DIR REPO_ROOT
 : "${RESOURCE_GROUP:=cosmos-rust-obs-soak-rg}"
 : "${LOCATION:=westus2}"
 
+# Suffix for the two names that are globally unique across all of Azure: the
+# container registry (`<name>.azurecr.io`) and the Cosmos account
+# (`<name>.documents.azure.com`). Everything else is only unique within its
+# resource group.
+#
+# Set this when standing the soak up somewhere new while the previous
+# deployment still exists -- which is the normal way to move tenants, because
+# you want the new one producing data before you delete the old one. Without a
+# suffix the second deployment fails on "name already in use". Alphanumeric
+# only: ACR names admit nothing else. See "Moving to a new tenant" in README.md.
+: "${NAME_SUFFIX:=}"
+[[ "${NAME_SUFFIX}" =~ ^[a-z0-9]*$ ]] ||
+    { printf 'error: NAME_SUFFIX must be lowercase alphanumeric (got %q)\n' "${NAME_SUFFIX}" >&2; exit 1; }
+
 # Resource names. ACR names must be globally unique and alphanumeric-only.
-: "${ACR_NAME:=cosmosrustobssoakacr}"
+: "${ACR_NAME:=cosmosrustobssoakacr${NAME_SUFFIX}}"
 : "${AKS_CLUSTER:=cosmos-rust-obs-soak-aks}"
 : "${AKS_NODE_COUNT:=2}"
 : "${AKS_NODE_SIZE:=Standard_D4s_v5}"
 : "${MONITOR_WORKSPACE:=cosmos-rust-obs-soak-amw}"
 : "${GRAFANA_NAME:=cosmos-rust-obs-soak-grafana}"
-: "${COSMOS_ACCOUNT:=cosmos-rust-obs-soak}"
+: "${COSMOS_ACCOUNT:=cosmos-rust-obs-soak${NAME_SUFFIX}}"
 : "${MANAGED_IDENTITY:=cosmos-obs-soak-identity}"
 
 # Set to point the soak at an existing Cosmos account in another resource group;
 # provisioning then only assigns data-plane RBAC instead of creating an account.
 : "${COSMOS_ACCOUNT_RESOURCE_GROUP:=${RESOURCE_GROUP}}"
 
+# Where the metric history and the dashboard live. Both default to the main
+# resource group, which is the simple case: one group, deleted as a unit.
+#
+# Point them at a separate, longer-lived group to decouple the *history* from
+# the *cluster*. The cluster is the disposable part -- it gets rebuilt whenever
+# the perf harness redeploys -- and if the Azure Monitor workspace shares its
+# resource group, every rebuild starts the regression trend over. A workspace in
+# its own group survives any number of cluster rebuilds within the same tenant.
+#
+# The group must already exist; provisioning will not create it, so a typo
+# cannot silently strand months of history in a group nobody knows about.
+: "${MONITOR_RESOURCE_GROUP:=${RESOURCE_GROUP}}"
+: "${GRAFANA_RESOURCE_GROUP:=${RESOURCE_GROUP}}"
+
 # --- Sharing a cluster with the Cosmos perf harness ---------------------------
 #
 # `provision-soak-infra.sh --attach-to-perf` reuses the cluster, registry,
-# Grafana workspace and managed identity that the Cosmos perf harness
-# (`rust-perf/deploy/deploy-k8s-deployments.sh` in the cosmos-sdk-copilot-toolkit
-# repo) already stands up, so a new tenant is one deployment rather than two
-# parallel stacks. Only what the perf harness has no equivalent of gets created:
-# an Azure Monitor workspace, the managed Prometheus addon, a dedicated node
-# pool, and the soak's own Cosmos account.
+# Grafana workspace and managed identity that the Cosmos DB team's internal Rust
+# perf harness already stands up, so a new tenant is one deployment rather than
+# two parallel stacks. Only what the perf harness has no equivalent of gets
+# created: an Azure Monitor workspace, the managed Prometheus addon, a dedicated
+# node pool, and the soak's own Cosmos account.
 #
 # Set PERF_RESOURCE_GROUP; the rest is discovered from it when left empty.
 : "${PERF_RESOURCE_GROUP:=}"
@@ -155,9 +182,10 @@ export SCRIPT_DIR REPO_ROOT
 : "${TEAM_ENTRA_GROUP:=}"
 : "${TEAM_GRAFANA_ROLE:=Grafana Viewer}"
 
-export SUBSCRIPTION_ID RESOURCE_GROUP LOCATION ACR_NAME AKS_CLUSTER \
+export SUBSCRIPTION_ID RESOURCE_GROUP LOCATION NAME_SUFFIX ACR_NAME AKS_CLUSTER \
     AKS_NODE_COUNT AKS_NODE_SIZE MONITOR_WORKSPACE GRAFANA_NAME COSMOS_ACCOUNT \
     MANAGED_IDENTITY COSMOS_ACCOUNT_RESOURCE_GROUP COSMOS_REGION \
+    MONITOR_RESOURCE_GROUP GRAFANA_RESOURCE_GROUP \
     MONITOR_LOCATION GRAFANA_LOCATION NAMESPACE \
     IMAGE_REPOSITORY IMAGE_TAG OTEL_COLLECTOR_VERSION SOAK_ENVIRONMENT \
     COSMOS_DATABASE COSMOS_CONTAINER COSMOS_THROUGHPUT SEED_COUNT CONCURRENCY \

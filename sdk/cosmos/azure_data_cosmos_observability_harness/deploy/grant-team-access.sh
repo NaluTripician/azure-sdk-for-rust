@@ -51,7 +51,7 @@ az_select_subscription
 az extension show --name amg >/dev/null 2>&1 || az extension add --name amg --only-show-errors
 
 GRAFANA_ID="$(az grafana show --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" --query id -o tsv 2>/dev/null || true)"
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" --query id -o tsv 2>/dev/null || true)"
 [[ -n "${GRAFANA_ID}" ]] ||
     die "Grafana workspace ${GRAFANA_NAME} not found; run ./provision-soak-infra.sh first"
 
@@ -98,7 +98,7 @@ fi
 # returns a 403, which reads as "the soak is broken" rather than "you lack
 # permission".
 MONITOR_WORKSPACE_ID="$(az monitor account show --name "${MONITOR_WORKSPACE}" \
-    --resource-group "${RESOURCE_GROUP}" --query id -o tsv 2>/dev/null || true)"
+    --resource-group "${MONITOR_RESOURCE_GROUP}" --query id -o tsv 2>/dev/null || true)"
 if [[ -n "${MONITOR_WORKSPACE_ID}" ]]; then
     log "Granting Monitoring Data Reader on ${MONITOR_WORKSPACE}"
     if ! az role assignment list \
@@ -118,7 +118,7 @@ else
 fi
 
 GRAFANA_ENDPOINT="$(az grafana show --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" --query properties.endpoint -o tsv)"
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" --query properties.endpoint -o tsv)"
 
 cat <<EOF
 

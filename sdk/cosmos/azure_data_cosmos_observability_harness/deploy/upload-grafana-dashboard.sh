@@ -10,9 +10,9 @@
 # — the same file the local docker-compose stack provisions — so the cloud
 # dashboard and a developer's laptop always show the same panels.
 #
-# Follows the pattern of `rust-perf/deploy/upload-grafana-dashboard.sh` in the
-# cosmos-sdk-copilot-toolkit repo: resolve the data source uid, substitute it in,
-# preserve the live dashboard's identity, and update in place. When the Grafana
+# Follows the same pattern as the Cosmos DB team's internal Rust perf harness:
+# resolve the data source uid, substitute it in, preserve the live dashboard's
+# identity, and update in place. When the Grafana
 # workspace is shared with the perf harness both dashboards coexist — they have
 # different uids and different data sources, and this script only ever touches
 # the one whose uid is in the JSON it was given.
@@ -60,7 +60,7 @@ az extension show --name amg >/dev/null 2>&1 || az extension add --name amg --on
 log "Resolving the Prometheus data source in ${GRAFANA_NAME}"
 DS_JSON="$(az grafana data-source list \
     --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" \
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" \
     -o json 2>/dev/null || echo '[]')"
 
 DS_COUNT="$(printf '%s' "${DS_JSON}" | jq '[.[] | select(.type == "prometheus")] | length' 2>/dev/null || echo 0)"
@@ -98,7 +98,7 @@ DASHBOARD_UID="$(jq -r '.uid // "cosmos-rust-ws9"' "${DASHBOARD_JSON}")"
 # one the team has bookmarked.
 EXISTING="$(az grafana dashboard show \
     --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" \
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" \
     --dashboard "${DASHBOARD_UID}" -o json 2>/dev/null || echo '')"
 
 EXISTING_ID=null
@@ -139,13 +139,13 @@ jq \
 log "Publishing to ${GRAFANA_NAME}"
 az grafana dashboard update \
     --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" \
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" \
     --definition "@${PAYLOAD}" \
     --overwrite true \
     --only-show-errors -o none
 
 GRAFANA_ENDPOINT="$(az grafana show --name "${GRAFANA_NAME}" \
-    --resource-group "${RESOURCE_GROUP}" --query properties.endpoint -o tsv)"
+    --resource-group "${GRAFANA_RESOURCE_GROUP}" --query properties.endpoint -o tsv)"
 
 cat <<EOF
 
